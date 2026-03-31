@@ -11,9 +11,30 @@ Claude Code 插件：将 Spring Boot Controller 接口同步到 Apifox 项目。
 
 ## 安装
 
-```bash
-claude plugin add --from github:anduinnn/apifox-sync
+### Claude Code
+
+在 Claude Code 对话中依次输入：
+
 ```
+/plugin marketplace add https://github.com/anduinnn/apifox-sync
+/plugin install apifox-sync@apifix-sync
+```
+
+### OpenCode
+
+项目级安装（仅当前项目生效）：
+
+```bash
+git clone https://github.com/anduinnn/apifox-sync.git .opencode/skills/apifox-sync
+```
+
+全局安装（所有项目生效）：
+
+```bash
+git clone https://github.com/anduinnn/apifox-sync.git ~/.config/opencode/skills/apifox-sync
+```
+
+OpenCode 启动时会自动加载插件目录下的插件。
 
 ## 使用
 
