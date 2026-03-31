@@ -1,0 +1,28 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "apifox-sync",
+  "description": "将 Spring Boot Controller 接口解析后同步到 Apifox 项目",
+  "owner": {
+    "name": "anduinnn"
+  },
+  "plugins": [
+    {
+      "name": "apifox-sync",
+      "description": "解析 Spring Boot Controller 源码，自动生成 OpenAPI 3.0 spec 并推送到 Apifox。支持 init 配置和 push 推送两个子命令。",
+      "version": "1.0.0",
+      "author": {
+        "name": "anduinnn"
+      },
+      "source": "./",
+      "category": "development",
+      "homepage": "https://github.com/anduinnn/apifox-sync",
+      "tags": [
+        "apifox",
+        "spring-boot",
+        "openapi",
+        "api-sync"
+      ]
+    }
+  ],
+  "version": "1.0.0"
+}

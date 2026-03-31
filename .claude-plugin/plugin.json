@@ -1,0 +1,18 @@
+{
+  "name": "apifox-sync",
+  "version": "1.0.0",
+  "description": "将 Spring Boot Controller 接口同步到 Apifox 项目",
+  "author": {
+    "name": "anduinnn"
+  },
+  "repository": "https://github.com/anduinnn/apifox-sync",
+  "homepage": "https://github.com/anduinnn/apifox-sync",
+  "license": "MIT",
+  "keywords": [
+    "apifox",
+    "spring-boot",
+    "openapi",
+    "api-sync",
+    "controller"
+  ]
+}
