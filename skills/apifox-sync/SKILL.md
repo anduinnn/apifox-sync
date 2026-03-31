@@ -344,6 +344,7 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
         "tags": ["{Tag名称}"],
         "summary": "{JavaDoc第一行}",
         "operationId": "{方法名}",
+        "x-apifox-folder": "{用户选择的目标文件夹路径，若选择根目录则不添加此属性}",
         "requestBody": {
           "required": true,
           "content": {
@@ -471,17 +472,19 @@ for f in sorted(folders):
 " 2>/dev/null
 ```
 
-如果文件夹列表不为空，用 `AskUserQuestion` 让用户选择目标文件夹：
-- 选项包含发现的所有文件夹 + "项目根目录（不指定文件夹）"
+用 `AskUserQuestion` 让用户选择目标文件夹：
+- 选项包含发现的所有文件夹 + "新建文件夹（输入路径）" + "项目根目录（不指定文件夹）"
+- 如果用户选择"新建文件夹"，再用 `AskUserQuestion` 让用户输入文件夹路径（支持多级路径，用 `/` 分隔，如 `设备管理/无人机`）
 
-如果文件夹列表为空（新建项目），跳过选择，推送到项目根目录。
+如果文件夹列表为空（新建项目），直接用 `AskUserQuestion` 询问用户是否需要指定文件夹路径，还是推送到项目根目录。
+
+**说明**：目标文件夹路径将写入 OpenAPI spec 每个 operation 的 `x-apifox-folder` 属性。Apifox 在导入时会自动创建不存在的文件夹层级。
 
 ### 步骤 11：推送到 Apifox
 
 构建 import-openapi 请求的 payload：
 
 ```bash
-SPEC_CONTENT=$(cat /tmp/apifox-sync-spec.json)
 python3 -c "
 import json
 spec = open('/tmp/apifox-sync-spec.json').read()
@@ -490,12 +493,10 @@ payload = {
     'options': {
         'endpointOverwriteBehavior': 'AUTO_MERGE',
         'schemaOverwriteBehavior': 'OVERWRITE_EXISTING',
-        'updateFolderOfChangedEndpoint': False,
+        'updateFolderOfChangedEndpoint': True,
         'prependBasePath': False
     }
 }
-# 如果用户选择了文件夹，添加 targetEndpointFolderId
-# payload['options']['targetEndpointFolderId'] = FOLDER_ID
 json.dump(payload, open('/tmp/apifox-sync-payload.json', 'w'))
 "
 ```
