@@ -482,38 +482,133 @@ for f in sorted(folders):
 
 ### 步骤 11：推送到 Apifox
 
-构建 import-openapi 请求的 payload：
+Apifox 以 path+method 为匹配键。为支持**同 path+method 在不同文件夹中作为独立接口**，需要按文件夹匹配情况分批推送。
+
+#### 11.1 构建现有接口查找表
+
+复用步骤 10 导出的 `/tmp/apifox-sync-export.json`，提取每个 operation 的 `{method}:{path}` → `x-apifox-folder` 映射：
 
 ```bash
 python3 -c "
 import json
-spec = open('/tmp/apifox-sync-spec.json').read()
-payload = {
-    'input': spec,
-    'options': {
-        'endpointOverwriteBehavior': 'AUTO_MERGE',
-        'schemaOverwriteBehavior': 'OVERWRITE_EXISTING',
-        'updateFolderOfChangedEndpoint': True,
-        'prependBasePath': False
-    }
-}
-json.dump(payload, open('/tmp/apifox-sync-payload.json', 'w'))
+data = json.load(open('/tmp/apifox-sync-export.json'))
+existing = {}
+for path, methods in data.get('paths', {}).items():
+    for method, detail in methods.items():
+        if isinstance(detail, dict):
+            folder = detail.get('x-apifox-folder', '')
+            key = f'{method.upper()}:{path}'
+            existing.setdefault(key, []).append(folder)
+json.dump(existing, open('/tmp/apifox-sync-existing.json', 'w'))
+print(f'已索引 {len(existing)} 个现有接口')
 "
 ```
 
-执行推送：
+#### 11.2 分批生成 payload
+
+读取生成的 spec 和查找表，将 operations 分为三类：安全更新、新建、冲突跳过。各自生成独立的 OpenAPI spec（共享 info 和 components/schemas）：
+
 ```bash
-PUSH_RESULT=$(curl -s -w "\n%{http_code}" -X POST \
-  "https://api.apifox.com/v1/projects/${PROJECT_ID}/import-openapi" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "X-Apifox-Api-Version: 2024-03-28" \
-  -H "Content-Type: application/json" \
-  -d @/tmp/apifox-sync-payload.json)
-HTTP_CODE=$(echo "$PUSH_RESULT" | tail -1)
-BODY=$(echo "$PUSH_RESULT" | sed '$d')
+python3 << 'PYEOF'
+import json, copy
+
+spec = json.load(open('/tmp/apifox-sync-spec.json'))
+existing = json.load(open('/tmp/apifox-sync-existing.json'))
+
+update_paths = {}   # 目标文件夹中已存在，且无其他文件夹重复 → 安全更新
+create_paths = {}   # 目标文件夹中不存在 → 新建
+skipped = []        # 目标文件夹中已存在，但其他文件夹也有同 path+method → 跳过
+
+for path, methods in spec.get('paths', {}).items():
+    for method, detail in methods.items():
+        if not isinstance(detail, dict):
+            continue
+        target_folder = detail.get('x-apifox-folder', '')
+        key = f'{method.upper()}:{path}'
+        existing_folders = existing.get(key, [])
+
+        if target_folder in existing_folders:
+            # 同文件夹已存在，检查是否有其他文件夹的重复
+            other_folders = [f for f in existing_folders if f != target_folder]
+            if other_folders:
+                # 其他文件夹也有同 path+method → AUTO_MERGE 会误更新，跳过
+                skipped.append(f'{method.upper()} {path} (目标: {target_folder}, 冲突: {", ".join(other_folders)})')
+            else:
+                # 仅目标文件夹有 → 安全更新
+                update_paths.setdefault(path, {})[method] = detail
+        else:
+            # 目标文件夹中不存在 → 新建
+            create_paths.setdefault(path, {})[method] = detail
+
+def build_spec(base_spec, paths):
+    s = copy.deepcopy(base_spec)
+    s['paths'] = paths
+    return s
+
+def build_payload(spec_obj, behavior, update_folder):
+    return {
+        'input': json.dumps(spec_obj, ensure_ascii=False),
+        'options': {
+            'endpointOverwriteBehavior': behavior,
+            'schemaOverwriteBehavior': 'OVERWRITE_EXISTING',
+            'updateFolderOfChangedEndpoint': update_folder,
+            'prependBasePath': False
+        }
+    }
+
+if update_paths:
+    payload = build_payload(build_spec(spec, update_paths), 'AUTO_MERGE', False)
+    json.dump(payload, open('/tmp/apifox-sync-payload-update.json', 'w'), ensure_ascii=False)
+
+if create_paths:
+    payload = build_payload(build_spec(spec, create_paths), 'CREATE_NEW', True)
+    json.dump(payload, open('/tmp/apifox-sync-payload-create.json', 'w'), ensure_ascii=False)
+
+update_count = sum(len(m) for m in update_paths.values())
+create_count = sum(len(m) for m in create_paths.values())
+print(f'更新批次: {update_count} 个接口')
+print(f'新建批次: {create_count} 个接口')
+if skipped:
+    print(f'跳过(冲突): {len(skipped)} 个接口')
+    for s in skipped:
+        print(f'  - {s}')
+    print('提示: 以上接口在多个文件夹中存在同 path+method，AUTO_MERGE 无法精确更新目标文件夹的接口。请在 Apifox 中手动删除其他文件夹的重复接口后重新推送。')
+PYEOF
 ```
 
-判断结果：
+#### 11.3 分别推送
+
+对每个非空批次执行推送。用 Bash 检查 payload 文件是否存在，存在则推送：
+
+**更新批次**（`AUTO_MERGE`）：
+```bash
+if [ -f /tmp/apifox-sync-payload-update.json ]; then
+  RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+    "https://api.apifox.com/v1/projects/${PROJECT_ID}/import-openapi" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "X-Apifox-Api-Version: 2024-03-28" \
+    -H "Content-Type: application/json" \
+    -d @/tmp/apifox-sync-payload-update.json)
+  echo "=== 更新批次 ==="
+  echo "$RESULT"
+fi
+```
+
+**新建批次**（`CREATE_NEW`）：
+```bash
+if [ -f /tmp/apifox-sync-payload-create.json ]; then
+  RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+    "https://api.apifox.com/v1/projects/${PROJECT_ID}/import-openapi" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "X-Apifox-Api-Version: 2024-03-28" \
+    -H "Content-Type: application/json" \
+    -d @/tmp/apifox-sync-payload-create.json)
+  echo "=== 新建批次 ==="
+  echo "$RESULT"
+fi
+```
+
+判断每个批次的结果：
 - `200` → 推送成功
 - `401` / `403` → Token 失效，建议重新运行 `init`
 - `400` → spec 格式错误，显示 Apifox 返回的错误信息
@@ -528,7 +623,7 @@ BODY=$(echo "$PUSH_RESULT" | sed '$d')
 
 清理临时文件：
 ```bash
-rm -f /tmp/apifox-sync-spec.json /tmp/apifox-sync-export.json /tmp/apifox-sync-payload.json
+rm -f /tmp/apifox-sync-spec.json /tmp/apifox-sync-export.json /tmp/apifox-sync-existing.json /tmp/apifox-sync-payload-update.json /tmp/apifox-sync-payload-create.json
 ```
 
 ---
@@ -540,4 +635,4 @@ rm -f /tmp/apifox-sync-spec.json /tmp/apifox-sync-export.json /tmp/apifox-sync-p
 3. **跨模块查找**：Glob 从项目根目录搜索，覆盖所有子模块
 4. **不可解析类型**：降级为 `{type: object}`，不中断整体流程
 5. **敏感信息**：Token 存储在项目级 `.claude/apifox.json`，建议加入 `.gitignore`。也可通过环境变量 `APIFOX_API_TOKEN` 配置
-6. **幂等性**：使用 `AUTO_MERGE` 模式，重复推送同一 Controller 不会产生重复接口
+6. **幂等性与文件夹隔离**：同一文件夹内重复推送同一 Controller 不会产生重复接口（`AUTO_MERGE` 更新）；若推送到不同文件夹，则会在新文件夹中创建独立接口（`CREATE_NEW`），不影响其他文件夹中的同名接口。**已知限制**：当同一 path+method 已存在于多个文件夹时，后续更新可能不准确（Apifox import API 以 path+method 全局匹配，无法按文件夹精确定位；且 OpenAPI 导出格式无法表示同 path+method 的多个副本，导致冲突检测不完整）。此场景仅在跨微服务推送到同一项目时出现，如遇到冲突提示，请在 Apifox 中手动删除多余的重复接口后重新推送
