@@ -1,0 +1,313 @@
+# Pull 步骤 1-7：配置、目录选择、导出、精简、保存
+
+API 常量参考 `data/api-config.json`。所有临时文件使用固定前缀 `TMPPREFIX="/tmp/apifox-sync-"`，每次 Bash 调用开头赋值：
+```bash
+TMPPREFIX="/tmp/apifox-sync-"
+```
+
+---
+
+## 步骤 1：加载配置
+
+先定位项目根目录（参见 SKILL.md 注意事项第 6 条）。
+
+按优先级读取（环境变量 > 项目配置文件）：
+
+1. `APIFOX_API_TOKEN` 环境变量 → Token
+2. `APIFOX_PROJECT_ID` 环境变量 → ProjectId
+3. `${PROJECT_ROOT}/.claude/apifox.json` 的 `apiToken` / `projectId`
+
+读取配置文件时用 Bash，**不要将 Token 明文输出到终端**：
+```bash
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+python3 -c "
+import json,os
+cfg = {}
+try: cfg = json.load(open(os.path.join('${PROJECT_ROOT}', '.claude', 'apifox.json')))
+except: pass
+t = os.environ.get('APIFOX_API_TOKEN', cfg.get('apiToken', ''))
+p = os.environ.get('APIFOX_PROJECT_ID', cfg.get('projectId', ''))
+print(f'HAS_TOKEN={\"yes\" if t else \"no\"}')
+print(f'PID={p}')
+" 2>/dev/null
+```
+
+将 Token 和 ProjectId 保存为后续 Bash 调用中的 shell 变量（通过读取配置文件赋值，不回显 Token）。
+
+如果 Token 或 ProjectId 为空，提示用户先运行 `/apifox-sync init`。
+
+---
+
+## 步骤 2：获取目录结构
+
+调用 Apifox export-openapi 获取现有文件夹结构。先用 Bash 赋值 TOKEN 和 PROJECT_ID（从步骤 1 加载的配置中取值，不回显 Token）：
+
+```bash
+TMPPREFIX="/tmp/apifox-sync-"
+EXPORT_RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"oasVersion":"3.0","exportFormat":"JSON","options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true}}')
+HTTP_CODE=$(echo "$EXPORT_RESULT" | tail -1)
+BODY=$(echo "$EXPORT_RESULT" | sed '$d')
+echo "HTTP_CODE=$HTTP_CODE"
+```
+
+**必须检查 HTTP 状态码**：
+- `200` → 继续解析
+- `401` / `403` → Token 失效，提示重新运行 `init`，中止流程
+- 其他 → 显示错误信息，中止流程
+
+状态码为 200 时，将结果写入临时文件并解析 `x-apifox-folder` 属性，提取所有文件夹路径：
+```bash
+echo "$BODY" > "${TMPPREFIX}export.json"
+python3 -c "
+import json, re, sys
+raw = open('${TMPPREFIX}export.json').read()
+raw = re.sub(r'\\\\(?![\"\\\\\/bfnrtu])', r'\\\\\\\\', raw)
+data = json.loads(raw, strict=False)
+if 'paths' not in data:
+    print('EXPORT_ERROR: 导出数据无 paths 字段，可能 API 返回了错误', file=sys.stderr)
+    sys.exit(1)
+folders = set()
+for path_data in data.get('paths', {}).values():
+    for method_data in path_data.values():
+        if isinstance(method_data, dict):
+            folder = method_data.get('x-apifox-folder', '')
+            if folder:
+                folders.add(folder)
+for f in sorted(folders):
+    print(f)
+"
+```
+
+如果文件夹列表为空，提示用户当前 Apifox 项目中尚无接口，中止流程。
+
+---
+
+## 步骤 3：用户选择目录
+
+用 `AskUserQuestion` 展示目录列表，**支持多选**（`multiSelect: true`）：
+
+- 选项为步骤 2 中提取到的所有文件夹路径（已排序）
+- 用户可同时选择多个目录
+
+示例：
+```
+请选择要拉取的目录（可多选）：
+☐ 用户管理
+☐ 用户管理/基础操作
+☐ 设备管理
+☐ 订单管理
+```
+
+记录用户选择的目录名称列表，传递给步骤 4。
+
+---
+
+## 步骤 4：按目录导出
+
+从步骤 2 导出的全量数据中，按实际的 `x-apifox-folder` 值分组，每个子目录生成一个独立文件。
+
+**重要**：不需要再次调用 API，直接从 `${TMPPREFIX}export.json` 中按 `x-apifox-folder` 属性筛选即可。
+
+**目录结构映射规则**：
+- 用户选择 `分批测试` → 筛选所有 `x-apifox-folder` 为 `分批测试` 或以 `分批测试/` 开头的接口
+- 按实际的 `x-apifox-folder` 值分组，每个唯一的文件夹路径生成一个 `.json` 文件
+- 示例：`分批测试/A` → `.claude/apis/分批测试/A.json`，`分批测试/B` → `.claude/apis/分批测试/B.json`
+
+```bash
+python3 << 'PYEOF'
+import json, re, sys, os
+
+tmpprefix = '/tmp/apifox-sync-'
+raw = open(f'{tmpprefix}export.json').read()
+raw = re.sub(r'\\(?!["\\\/bfnrtu])', r'\\\\', raw)
+data = json.loads(raw, strict=False)
+
+# 用户选择的目录列表（由上一步传入）
+selected_folders = [SELECTED_FOLDERS_LIST]
+
+# 第一步：收集所有匹配的接口，按实际 x-apifox-folder 分组
+folder_groups = {}  # {实际文件夹路径: {api_path: {method: detail}}}
+for sel_folder in selected_folders:
+    for path, methods in data.get('paths', {}).items():
+        for method, detail in methods.items():
+            if isinstance(detail, dict):
+                op_folder = detail.get('x-apifox-folder', '')
+                if op_folder == sel_folder or op_folder.startswith(sel_folder + '/'):
+                    folder_groups.setdefault(op_folder, {}).setdefault(path, {})[method] = detail
+
+if not folder_groups:
+    print('WARN: 所选目录下未找到任何接口')
+    sys.exit(0)
+
+# 需要保留的扩展属性白名单
+KEEP_EXTENSIONS = {'x-apifox-folder', 'x-apifox-status', 'x-apifox-enum'}
+
+def clean_extensions(obj):
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            if key.startswith('x-') and key not in KEEP_EXTENSIONS:
+                del obj[key]
+        for v in obj.values():
+            clean_extensions(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            clean_extensions(item)
+
+def collect_refs(obj, refs):
+    if isinstance(obj, dict):
+        if '$ref' in obj:
+            ref = obj['$ref']
+            if ref.startswith('#/components/schemas/'):
+                refs.add(ref.split('/')[-1])
+        for v in obj.values():
+            collect_refs(v, refs)
+    elif isinstance(obj, list):
+        for item in obj:
+            collect_refs(item, refs)
+
+all_schemas = data.get('components', {}).get('schemas', {})
+
+# 第二步：对每个实际文件夹路径，生成独立的精简 JSON
+for actual_folder in sorted(folder_groups.keys()):
+    filtered_paths = folder_groups[actual_folder]
+
+    # 收集引用的 schema 名称（递归）
+    refs = set()
+    collect_refs(filtered_paths, refs)
+
+    resolved = set()
+    def resolve_schema_refs(name):
+        if name in resolved or name not in all_schemas:
+            return
+        resolved.add(name)
+        collect_refs(all_schemas[name], refs)
+        for ref_name in list(refs):
+            if ref_name not in resolved:
+                resolve_schema_refs(ref_name)
+
+    for ref_name in list(refs):
+        resolve_schema_refs(ref_name)
+
+    filtered_schemas = {name: all_schemas[name] for name in refs if name in all_schemas}
+
+    # 清理冗余扩展属性
+    clean_extensions(filtered_paths)
+    clean_extensions(filtered_schemas)
+
+    result = {
+        'paths': filtered_paths,
+        'components': {'schemas': filtered_schemas}
+    }
+
+    # 保存到临时文件（供步骤 6 使用）
+    safe_name = actual_folder.replace('/', '__')
+    out_path = f'{tmpprefix}pull-{safe_name}.json'
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    api_count = sum(len(m) for m in filtered_paths.values())
+    schema_count = len(filtered_schemas)
+    print(f'OK: "{actual_folder}" — {api_count} 个接口, {schema_count} 个 Schema → {out_path}')
+PYEOF
+```
+
+**说明**：
+- `SELECTED_FOLDERS_LIST` 需替换为实际的 Python 列表字面量，如 `'用户管理', '设备管理'`
+- 目录匹配采用精确匹配 + 子目录前缀匹配（`op_folder == folder or op_folder.startswith(folder + '/')`），确保选择父目录时包含子目录的接口
+- 递归收集 schema 引用，确保嵌套引用的 schema 不遗漏
+
+---
+
+## 步骤 5：精简 OpenAPI
+
+> 此步骤已内联到步骤 4 的 python3 脚本中。
+
+精简规则汇总：
+1. **不包含**顶层 `openapi`、`info`、`servers`、`tags`、`externalDocs`、`security` 字段
+2. **保留** `paths` 和 `components`（仅 schemas 部分）
+3. **删除**冗余扩展属性：`x-apifox-name`、`x-apifox-id` 及其他内部标识
+4. **保留**有价值的扩展属性：`x-apifox-folder`、`x-apifox-status`、`x-apifox-enum`
+5. 仅包含被 paths 引用的 schemas（递归解析引用链），不含全量 schemas
+
+---
+
+## 步骤 6：保存文件
+
+将步骤 4 生成的临时文件移动到项目的 `.claude/apis/` 目录下，路径与 Apifox 目录结构一致。
+
+**路径映射规则**：每个实际的 `x-apifox-folder` 路径直接映射为本地目录 + 文件名：
+- `分批测试/A` → `.claude/apis/分批测试/A.json`
+- `分批测试/B` → `.claude/apis/分批测试/B.json`
+- `设备管理/无人机` → `.claude/apis/设备管理/无人机.json`
+- `用户管理` → `.claude/apis/用户管理.json`（无子目录时直接作为文件名）
+
+```bash
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+TMPPREFIX="/tmp/apifox-sync-"
+
+python3 << 'PYEOF'
+import os, shutil, glob
+
+project_root = os.environ.get('PROJECT_ROOT', '') or os.popen("git rev-parse --show-toplevel 2>/dev/null || echo $PWD").read().strip()
+tmpprefix = '/tmp/apifox-sync-'
+apis_dir = os.path.join(project_root, '.claude', 'apis')
+
+saved_files = []
+for tmp_path in sorted(glob.glob(f'{tmpprefix}pull-*.json')):
+    # 从临时文件名还原实际文件夹路径：pull-分批测试__B.json → 分批测试/B
+    basename = os.path.basename(tmp_path)  # apifox-sync-pull-分批测试__B.json
+    folder_safe = basename.replace('apifox-sync-pull-', '').replace('.json', '')
+    actual_folder = folder_safe.replace('__', '/')
+
+    # 构建目标路径：.claude/apis/{实际文件夹路径}.json
+    # 最后一段作为文件名，前面的段作为目录
+    parts = actual_folder.rsplit('/', 1)
+    if len(parts) == 2:
+        parent_dir = os.path.join(apis_dir, parts[0])
+        os.makedirs(parent_dir, exist_ok=True)
+        target_path = os.path.join(apis_dir, parts[0], parts[1] + '.json')
+    else:
+        os.makedirs(apis_dir, exist_ok=True)
+        target_path = os.path.join(apis_dir, actual_folder + '.json')
+
+    shutil.move(tmp_path, target_path)
+    rel_path = os.path.relpath(target_path, project_root)
+    saved_files.append((actual_folder, rel_path))
+
+for folder, rel_path in saved_files:
+    print(f'SAVED: "{folder}" → {rel_path}')
+PYEOF
+```
+
+---
+
+## 步骤 7：输出结果摘要并清理
+
+输出拉取结果摘要，包含：
+- 拉取的目录数量
+- 每个目录的接口数量
+- 保存的文件路径
+
+格式示例：
+```
+拉取完成！
+
+| 目录 | 接口数 | 保存路径 |
+|------|--------|---------|
+| 用户管理 | 5 | .claude/apis/用户管理.json |
+| 设备管理 | 8 | .claude/apis/设备管理.json |
+
+共拉取 2 个目录，13 个接口。
+```
+
+清理临时文件：
+```bash
+TMPPREFIX="/tmp/apifox-sync-"
+rm -f "${TMPPREFIX}export.json"
+find /tmp -maxdepth 1 -name "apifox-sync-pull-*.json" -delete 2>/dev/null
+```

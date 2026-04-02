@@ -1,13 +1,15 @@
 ---
 name: apifox-sync
-description: 将 Spring Boot Controller 接口同步到 Apifox 项目
-argument-hint: "<init|push> [args]"
+description: Apifox 接口同步工具：推送 Spring Boot Controller 到 Apifox，或从 Apifox 拉取接口定义
+argument-hint: "<init|push|pull> [args]"
 level: 2
 ---
 
 # Apifox Sync
 
-将 Spring Boot Controller 接口定义从源码解析后推送到 Apifox 指定项目。
+Apifox 接口同步工具，支持双向操作：
+- **push**：将 Spring Boot Controller 接口定义从源码解析后推送到 Apifox
+- **pull**：从 Apifox 拉取指定目录的接口定义到本地
 
 ## 子命令路由
 
@@ -15,11 +17,13 @@ level: 2
 
 - `init` → 读取 `references/init.md` 并执行
 - `push` → 按下方 [Push 流程](#push-流程) 执行
+- `pull` → 按下方 [Pull 流程](#pull-流程) 执行
 - 无参数或未知子命令 → 提示用法：
   > 用法：
   > - `/apifox-sync init` — 配置 Apifox API Token 和项目 ID
   > - `/apifox-sync push @Controller.java` — 推送整个 Controller
   > - `/apifox-sync push @Controller.java#L35` — 推送单个接口
+  > - `/apifox-sync pull` — 从 Apifox 拉取指定目录的接口定义
 
 ---
 
@@ -64,6 +68,22 @@ level: 2
 10. **JSON 预验证** — 写入临时文件并用 python3 验证语法，最多重试 3 次
 11. **分批推送** — 按冲突分类（安全更新 / 新建 / 跳过），分别调用 import-openapi
 12. **报告结果** — 显示推送结果并清理临时文件
+
+---
+
+## Pull 流程
+
+从 Apifox 项目中按目录拉取接口定义，以精简 OpenAPI JSON 格式保存到本地 `.claude/apis/` 目录。
+
+读取 `references/pull.md` 按以下步骤顺序执行：
+
+1. **加载配置** — 读取 Token 和 ProjectId（环境变量 > `.claude/apifox.json`）
+2. **获取目录结构** — 调用 export-openapi 导出全量，解析 `x-apifox-folder` 构建目录树
+3. **用户选择目录** — 通过 AskUserQuestion 展示目录列表，支持多选
+4. **按目录导出** — 从全量数据中按 `x-apifox-folder` 筛选接口，递归收集引用的 schemas
+5. **精简 OpenAPI** — 去掉冗余元数据和扩展属性，仅保留 paths + schemas
+6. **保存文件** — 写入 `.claude/apis/{目录路径}.json`，路径与 Apifox 目录结构一致
+7. **输出结果摘要** — 报告拉取的目录数、接口数、保存路径，清理临时文件
 
 ---
 
