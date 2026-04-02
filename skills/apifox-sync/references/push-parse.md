@@ -94,7 +94,7 @@ print(f'PID={p}')
 
 **`@RequestBody ClassName param`**：
 - 如果 ClassName 是 `List<T>`（如 `List<DeviceGroupSortReq>`）→ 请求体 schema 为 `{type: array, items: {$ref: T}}`
-- 如果 ClassName 是 `List<String>` / `List<Long>` 等基础类型集合 → `{type: array, items: {type: string/integer}}`
+- 如果 ClassName 是 `List<String>` / `List<Integer>` 等基础类型集合 → `{type: array, items: {type: string/integer}}`
 - 否则 → 读取 ClassName 源文件，提取所有字段作为 request body schema（见 `references/type-resolution.md`）
 
 **`@PathVariable Long id`**：
@@ -110,7 +110,7 @@ print(f'PID={p}')
   - `@RequestParam(required = false)` → 参数 `required: false`
   - `@RequestParam(defaultValue = "xxx")` → 参数 `required: false`，schema 中加 `default: "xxx"`
   - 无 required/defaultValue 属性 → 默认 `required: true`
-- 如果参数类型是 `List<String>` / `List<Long>` 等集合 → schema 为 `{type: array, items: {type: string/integer}}`，并设置 `style: form, explode: true`
+- 如果参数类型是 `List<String>` / `List<Integer>` 等集合 → schema 为 `{type: array, items: {type: string/integer}}`，并设置 `style: form, explode: true`
 
 **`@RequestHeader("X-Custom") String header`**：
 - 作为 header parameter
