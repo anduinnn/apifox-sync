@@ -34,7 +34,7 @@ print(f'PID={p}')
 
 将 Token 和 ProjectId 保存为后续 Bash 调用中的 shell 变量（通过读取配置文件赋值，不回显 Token）。
 
-如果 Token 或 ProjectId 为空，提示用户先运行 `/apifox-sync init`。
+如果 Token 或 ProjectId 为空，**不要提示用户手动运行 init**，而是自动进入初始化流程：读取 `references/init.md` 并执行其中的步骤 2-4（收集凭证、验证连通性、保存配置）。完成后将获取到的 Token 和 ProjectId 赋值给 shell 变量，继续执行下方的拉取步骤。
 
 ---
 
@@ -57,7 +57,7 @@ echo "HTTP_CODE=$HTTP_CODE"
 
 **必须检查 HTTP 状态码**：
 - `200` → 继续解析
-- `401` / `403` → Token 失效，提示重新运行 `init`，中止流程
+- `401` / `403` → Token 失效，自动进入初始化流程：读取 `references/init.md` 并执行步骤 2-4（收集凭证、验证连通性、保存配置），完成后用新的 Token 和 ProjectId 重试当前请求
 - 其他 → 显示错误信息，中止流程
 
 状态码为 200 时，将结果写入临时文件并解析 `x-apifox-folder` 属性，提取所有文件夹路径：
