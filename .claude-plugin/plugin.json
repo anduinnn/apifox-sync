@@ -1,6 +1,6 @@
 {
   "name": "apifox-sync",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "将 Spring Boot Controller 接口同步到 Apifox 项目",
   "author": {
     "name": "anduinnn"
