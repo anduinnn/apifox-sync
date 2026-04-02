@@ -1,0 +1,49 @@
+{
+  "_description": "Java 类型到 OpenAPI Schema 的映射表。基础类型直接映射，不需要 Glob 搜索源文件。",
+  "primitives": {
+    "String": { "type": "string" },
+    "Integer": { "type": "integer", "format": "int32" },
+    "int": { "type": "integer", "format": "int32" },
+    "Long": { "type": "integer", "format": "int64" },
+    "long": { "type": "integer", "format": "int64" },
+    "BigDecimal": { "type": "number" },
+    "Double": { "type": "number" },
+    "double": { "type": "number" },
+    "Float": { "type": "number" },
+    "float": { "type": "number" },
+    "Boolean": { "type": "boolean" },
+    "boolean": { "type": "boolean" },
+    "LocalDateTime": { "type": "string", "format": "date-time" },
+    "LocalDate": { "type": "string", "format": "date" },
+    "Date": { "type": "string", "format": "date-time" },
+    "JSONObject": { "type": "object", "additionalProperties": true },
+    "JSONArray": { "type": "array", "items": { "type": "object" } },
+    "MultipartFile": { "type": "string", "format": "binary" },
+    "Object": { "type": "object" }
+  },
+  "collections": {
+    "List": { "type": "array", "itemsFrom": "generic_T" },
+    "Set": { "type": "array", "itemsFrom": "generic_T" },
+    "Collection": { "type": "array", "itemsFrom": "generic_T" },
+    "Map": { "type": "object", "additionalPropertiesFrom": "generic_V" }
+  },
+  "frameworkIgnored": [
+    "HttpServletRequest",
+    "HttpServletResponse",
+    "BindingResult",
+    "SseEmitter",
+    "RedirectAttributes"
+  ],
+  "validationToOpenAPI": {
+    "_description": "Bean Validation 注解到 OpenAPI schema 约束字段的映射",
+    "@Size(min=X,max=Y)": { "minLength": "X", "maxLength": "Y" },
+    "@Min(X)": { "minimum": "X" },
+    "@Max(X)": { "maximum": "X" },
+    "@Pattern(regexp=X)": { "pattern": "X" },
+    "@Email": { "format": "email" },
+    "@Positive": { "minimum": 1 },
+    "@PositiveOrZero": { "minimum": 0 },
+    "@Negative": { "maximum": -1 },
+    "@NegativeOrZero": { "maximum": 0 }
+  }
+}

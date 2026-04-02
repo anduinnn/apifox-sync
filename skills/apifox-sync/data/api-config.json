@@ -1,0 +1,16 @@
+{
+  "_description": "Apifox API 常量配置，所有 curl 调用统一引用此文件，避免硬编码分散",
+  "baseUrl": "https://api.apifox.com/v1",
+  "apiVersion": "2024-03-28",
+  "headers": {
+    "authorization": "Authorization: Bearer ${TOKEN}",
+    "apiVersion": "X-Apifox-Api-Version: 2024-03-28",
+    "contentType": "Content-Type: application/json"
+  },
+  "endpoints": {
+    "exportOpenapi": "/projects/${PROJECT_ID}/export-openapi",
+    "importOpenapi": "/projects/${PROJECT_ID}/import-openapi"
+  },
+  "projectUrl": "https://app.apifox.com/project/${PROJECT_ID}",
+  "tempFilePrefix": "/tmp/apifox-sync-${PPID}-"
+}

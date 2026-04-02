@@ -1,0 +1,53 @@
+{
+  "_description": "框架内置骨架类型的 OpenAPI Schema 模板。优先读取项目源文件，源文件不可达时使用此降级结构。",
+  "Page": {
+    "_note": "MyBatis Plus 分页对象 Page<T> / IPage<T>，T 替换为实际泛型类型",
+    "type": "object",
+    "properties": {
+      "records": { "type": "array", "items": "<T>", "description": "数据列表" },
+      "total": { "type": "integer", "format": "int64", "description": "总记录数" },
+      "size": { "type": "integer", "format": "int64", "description": "每页大小" },
+      "current": { "type": "integer", "format": "int64", "description": "当前页码" },
+      "pages": { "type": "integer", "format": "int64", "description": "总页数" }
+    }
+  },
+  "R": {
+    "_note": "统一返回包装类 R<T> / Result<T> / Response<T> 的降级结构，优先读取源文件",
+    "type": "object",
+    "properties": {
+      "code": { "type": "integer", "format": "int32", "description": "状态码" },
+      "msg": { "type": "string", "description": "消息" },
+      "data": "<T>",
+      "success": { "type": "boolean", "description": "是否成功" }
+    }
+  },
+  "PageRequest": {
+    "_note": "分页请求基类 PageBaseRequest / PageQuery 的降级结构，优先读取源文件",
+    "type": "object",
+    "properties": {
+      "pageNum": { "type": "integer", "format": "int32", "description": "页码", "default": 1 },
+      "pageSize": { "type": "integer", "format": "int32", "description": "每页大小", "default": 10 }
+    }
+  },
+  "schemaNameRules": {
+    "dto": "{ClassName}",
+    "rWrapper": "R_{InnerType}",
+    "pageWrapper": "Page_{InnerType}"
+  },
+  "genericPlaceholderRules": {
+    "_description": "模板中 <T> 占位符的替换规则",
+    "ifCustomType": "替换为 {\"$ref\": \"#/components/schemas/{TypeName}\"}，TypeName 在 components/schemas 中定义",
+    "ifPrimitiveType": "替换为对应的 primitives 表中的 inline schema（如 {\"type\": \"string\"}）",
+    "ifCollectionType": "替换为 {\"type\": \"array\", \"items\": {\"$ref\": \"#/components/schemas/{ElementType}\"}}"
+  },
+  "schemaNameSanitization": {
+    "_description": "嵌套泛型类型生成 schema 名称时，必须清洗非法字符",
+    "rule": "将 <、>、, 和空格替换为下划线 _，多个连续下划线合并为一个",
+    "examples": {
+      "R<Map<String, List<XxxVO>>>": "R_Map_String_List_XxxVO",
+      "R<Page<XxxVO>>": "R_Page_XxxVO",
+      "R<List<XxxVO>>": "R_List_XxxVO",
+      "Page<XxxVO>": "Page_XxxVO"
+    }
+  }
+}
