@@ -60,3 +60,12 @@ OpenCode 启动时会自动加载插件目录下的插件。
 # 从 Apifox 拉取指定目录的接口定义
 /apifox-sync pull
 ```
+
+## 注意事项
+
+**同 path+method 跨文件夹的限制**：Apifox 允许同一个 path+method（如 `POST /api/users`）存在于不同文件夹中，但 OpenAPI 规范以 path+method 为唯一键，导出时只会保留其中一个。这会影响：
+
+- **push**：当同一 path+method 已存在于多个文件夹时，更新可能无法精确命中目标文件夹的接口
+- **pull**：跨文件夹的重复接口只会被拉取到其中一个文件夹的文件中，其他文件夹会丢失该接口
+
+建议避免在不同文件夹中创建相同 path+method 的接口。
