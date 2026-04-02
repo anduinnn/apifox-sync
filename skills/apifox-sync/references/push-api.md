@@ -35,8 +35,10 @@ echo "HTTP_CODE=$HTTP_CODE"
 ```bash
 echo "$BODY" > "${TMPPREFIX}export.json"
 python3 -c "
-import json, sys
-data = json.load(open('${TMPPREFIX}export.json'))
+import json, re, sys
+raw = open('${TMPPREFIX}export.json').read()
+raw = re.sub(r'\\\\(?![\"\\\\\/bfnrtu])', r'\\\\\\\\', raw)
+data = json.loads(raw, strict=False)
 if 'paths' not in data:
     print('EXPORT_ERROR: 导出数据无 paths 字段，可能 API 返回了错误', file=sys.stderr)
     sys.exit(1)
@@ -97,8 +99,10 @@ Apifox 以 path+method 为匹配键。为支持**同 path+method 在不同文件
 
 ```bash
 python3 -c "
-import json
-data = json.load(open('${TMPPREFIX}export.json'))
+import json, re
+raw = open('${TMPPREFIX}export.json').read()
+raw = re.sub(r'\\\\(?![\"\\\\\/bfnrtu])', r'\\\\\\\\', raw)
+data = json.loads(raw, strict=False)
 existing = {}
 for path, methods in data.get('paths', {}).items():
     for method, detail in methods.items():
