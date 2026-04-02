@@ -12,5 +12,5 @@
     "importOpenapi": "/projects/${PROJECT_ID}/import-openapi"
   },
   "projectUrl": "https://app.apifox.com/project/${PROJECT_ID}",
-  "tempFilePrefix": "/tmp/apifox-sync-${PPID}-"
+  "tempFilePrefix": "/tmp/apifox-sync-"
 }
