@@ -1,8 +1,10 @@
 # Push 步骤 8、10-12：文件夹选择、验证、推送、报告
 
-API 常量参考 `data/api-config.json`。所有临时文件使用固定前缀 `TMPPREFIX="/tmp/apifox-sync-"`，每次 Bash 调用开头赋值：
+API 常量参考 `data/api-config.json`。所有临时文件统一放在项目的 `.claude/.tmp/` 目录下（该目录已被 `.claude/` 规则 gitignore），每次 Bash 调用开头赋值 `TMPPREFIX` 并确保目录存在。Python 子进程通过环境变量 `TMPPREFIX` 读取前缀：
 ```bash
-TMPPREFIX="/tmp/apifox-sync-"
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
+export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
 ```
 
 ---
@@ -14,7 +16,9 @@ TMPPREFIX="/tmp/apifox-sync-"
 调用 Apifox export-openapi 获取现有文件夹结构。先用 Bash 赋值 TOKEN 和 PROJECT_ID（从步骤 2 加载的配置中取值，不回显 Token）：
 
 ```bash
-TMPPREFIX="/tmp/apifox-sync-"
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
+export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
 EXPORT_RESULT=$(curl -s -w "\n%{http_code}" -X POST \
   "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -123,7 +127,7 @@ print(f'已索引 {len(existing)} 个现有接口')
 python3 << 'PYEOF'
 import json, copy, os
 
-tmpprefix = '/tmp/apifox-sync-'
+tmpprefix = os.environ['TMPPREFIX']
 spec = json.load(open(f'{tmpprefix}spec.json'))
 existing = json.load(open(f'{tmpprefix}existing.json'))
 

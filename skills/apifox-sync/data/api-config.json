@@ -12,5 +12,7 @@
     "importOpenapi": "/projects/${PROJECT_ID}/import-openapi"
   },
   "projectUrl": "https://app.apifox.com/project/${PROJECT_ID}",
-  "tempFilePrefix": "/tmp/apifox-sync-"
+  "_tempFilePrefixNote": "临时文件前缀由 Bash 运行时计算为 ${PROJECT_ROOT}/.claude/.tmp/apifox-sync-，并通过环境变量 TMPPREFIX 传递给子进程",
+  "tempFileDir": ".claude/.tmp",
+  "tempFilePrefix": "apifox-sync-"
 }
