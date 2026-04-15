@@ -235,14 +235,150 @@ PYEOF
 1. **不包含**顶层 `openapi`、`info`、`servers`、`tags`、`externalDocs`、`security` 字段
 2. **保留** `paths` 和 `components`（仅 schemas 部分）
 3. **删除**冗余扩展属性：`x-apifox-name`、`x-apifox-id` 及其他内部标识
-4. **保留**有价值的扩展属性：`x-apifox-folder`、`x-apifox-status`、`x-apifox-enum`
+4. **保留**有价值的扩展属性：`x-apifox-folder`、`x-apifox-status`、`x-apifox-enum`、`x-source-controller`、`x-source-method-fq`
 5. 仅包含被 paths 引用的 schemas（递归解析引用链），不含全量 schemas
+
+> **锚点保留说明**：`x-source-controller` 和 `x-source-method-fq` 在 push 时由本工具写入，pull 时保留可以帮助用户在本地 JSON 中识别接口来源；如果远程接口没有这两个字段（手动在 Apifox 创建的），pull 结果中自然也不会有。
+
+---
+
+## 步骤 5.5：本地/远程 diff 预览
+
+在把临时文件写回 `.claude/apis/` 前，先做一次 diff 预览，避免静默覆盖掉用户本地的修改。
+
+```bash
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
+export PROJECT_ROOT
+export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
+
+python3 << 'PYEOF'
+import os, json, glob
+
+project_root = os.environ.get('PROJECT_ROOT', '') or os.popen("git rev-parse --show-toplevel 2>/dev/null || echo $PWD").read().strip()
+tmpprefix = os.environ['TMPPREFIX']
+apis_dir = os.path.join(project_root, '.claude', 'apis')
+
+def flatten_ops(data):
+    """将 paths 扁平化为 {METHOD path: detail_dict}，比较时直接用 dict 相等。"""
+    out = {}
+    for path, methods in data.get('paths', {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, detail in methods.items():
+            if not isinstance(detail, dict):
+                continue
+            out[f'{method.upper()} {path}'] = detail
+    return out
+
+def folder_from_tmp(tmp_path):
+    """pull-分批测试__B.json → 分批测试/B"""
+    basename = os.path.basename(tmp_path)
+    folder_safe = basename.replace('apifox-sync-pull-', '').replace('.json', '')
+    return folder_safe.replace('__', '/')
+
+def local_file_for(actual_folder):
+    parts = actual_folder.rsplit('/', 1)
+    if len(parts) == 2:
+        return os.path.join(apis_dir, parts[0], parts[1] + '.json')
+    return os.path.join(apis_dir, actual_folder + '.json')
+
+summary = {}  # {actual_folder: {'new'|'updated'|'removed'|'unchanged': [...], 'status': 'new-file'|'diff'|'nochange'}}
+
+for tmp_path in sorted(glob.glob(f'{tmpprefix}pull-*.json')):
+    actual_folder = folder_from_tmp(tmp_path)
+    new_data = json.load(open(tmp_path, encoding='utf-8'))
+    new_ops = flatten_ops(new_data)
+
+    local_path = local_file_for(actual_folder)
+    if not os.path.exists(local_path):
+        summary[actual_folder] = {
+            'status': 'new-file',
+            'new': sorted(new_ops.keys()),
+            'updated': [],
+            'removed': [],
+            'unchanged': []
+        }
+        continue
+
+    try:
+        old_data = json.load(open(local_path, encoding='utf-8'))
+    except Exception as e:
+        summary[actual_folder] = {
+            'status': 'new-file',
+            'new': sorted(new_ops.keys()),
+            'updated': [],
+            'removed': [],
+            'unchanged': [],
+            '_warn': f'本地文件解析失败，按全新文件处理: {e}'
+        }
+        continue
+
+    old_ops = flatten_ops(old_data)
+    added    = sorted(new_ops.keys() - old_ops.keys())
+    removed  = sorted(old_ops.keys() - new_ops.keys())
+    changed  = sorted([k for k in new_ops.keys() & old_ops.keys() if new_ops[k] != old_ops[k]])
+    same     = sorted([k for k in new_ops.keys() & old_ops.keys() if new_ops[k] == old_ops[k]])
+
+    if not (added or removed or changed):
+        summary[actual_folder] = {'status': 'nochange', 'new': [], 'updated': [], 'removed': [], 'unchanged': same}
+    else:
+        summary[actual_folder] = {'status': 'diff', 'new': added, 'updated': changed, 'removed': removed, 'unchanged': same}
+
+json.dump(summary, open(f'{tmpprefix}pull-diff.json', 'w'), ensure_ascii=False, indent=2)
+
+# 人类可读摘要
+for folder in sorted(summary.keys()):
+    info = summary[folder]
+    local = os.path.relpath(local_file_for(folder), project_root)
+    if info['status'] == 'new-file':
+        print(f'\n[NEW  ] {folder}  → {local}（本地不存在，将新建）')
+        for k in info['new']:
+            print(f'    + {k}')
+        if info.get('_warn'):
+            print(f'    ⚠️  {info["_warn"]}')
+    elif info['status'] == 'nochange':
+        print(f'\n[ SAME] {folder}  → {local}（无变化，{len(info["unchanged"])} 个接口）')
+    else:
+        print(f'\n[DIFF ] {folder}  → {local}')
+        for k in info['new']:     print(f'    + {k}')
+        for k in info['updated']: print(f'    ~ {k}')
+        for k in info['removed']: print(f'    - {k}  （远程已删除，本地将被清理）')
+PYEOF
+```
+
+解析上面打印的摘要后，用 `AskUserQuestion` 询问用户如何处理：
+
+- **全部覆盖**（推荐）→ 把所有临时文件 move 到目标路径
+- **逐目录选择** → 再次用 `AskUserQuestion`（multiSelect），仅覆盖勾选的目录，其他目录对应的临时文件删除不落盘
+- **取消** → 删除所有临时文件，中止流程
+
+特殊情况：
+- 若所有目录的 `status` 都是 `nochange`，直接跳过询问，提示"远程无变化"并进入步骤 7 的清理。
+- 若所有目录的 `status` 都是 `new-file`（即本地首次 pull），建议默认全部保存，可以跳过询问直接写入。
+
+确认结果保存为临时文件 `${TMPPREFIX}pull-approved.json`（字符串数组，装着用户同意覆盖的 `actual_folder` 列表）：
+
+```bash
+# 全部覆盖时
+python3 -c "
+import json, glob, os
+tmpprefix = os.environ['TMPPREFIX']
+folders = []
+for p in glob.glob(f'{tmpprefix}pull-*.json'):
+    if p.endswith('pull-diff.json') or p.endswith('pull-approved.json'):
+        continue
+    base = os.path.basename(p).replace('apifox-sync-pull-','').replace('.json','')
+    folders.append(base.replace('__','/'))
+json.dump(sorted(folders), open(f'{tmpprefix}pull-approved.json','w'), ensure_ascii=False)
+"
+```
 
 ---
 
 ## 步骤 6：保存文件
 
-将步骤 4 生成的临时文件移动到项目的 `.claude/apis/` 目录下，路径与 Apifox 目录结构一致。
+只把用户在步骤 5.5 确认过的目录（`${TMPPREFIX}pull-approved.json` 中列出的）从临时文件移动到 `.claude/apis/`。未在白名单里的临时文件直接删除，不写入本地。
 
 **路径映射规则**：每个实际的 `x-apifox-folder` 路径直接映射为本地目录 + 文件名：
 - `分批测试/A` → `.claude/apis/分批测试/A.json`
@@ -257,21 +393,37 @@ export PROJECT_ROOT
 export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
 
 python3 << 'PYEOF'
-import os, shutil, glob
+import os, shutil, glob, json
 
 project_root = os.environ.get('PROJECT_ROOT', '') or os.popen("git rev-parse --show-toplevel 2>/dev/null || echo $PWD").read().strip()
 tmpprefix = os.environ['TMPPREFIX']
 apis_dir = os.path.join(project_root, '.claude', 'apis')
 
+# 读取已确认的白名单
+approved_path = f'{tmpprefix}pull-approved.json'
+try:
+    approved = set(json.load(open(approved_path, encoding='utf-8')))
+except Exception:
+    approved = set()  # 缺失视为全部跳过（步骤 5.5 应该已经写入）
+
 saved_files = []
+skipped_files = []
+
 for tmp_path in sorted(glob.glob(f'{tmpprefix}pull-*.json')):
+    if tmp_path.endswith('pull-diff.json') or tmp_path.endswith('pull-approved.json'):
+        continue
+
     # 从临时文件名还原实际文件夹路径：pull-分批测试__B.json → 分批测试/B
-    basename = os.path.basename(tmp_path)  # apifox-sync-pull-分批测试__B.json
+    basename = os.path.basename(tmp_path)
     folder_safe = basename.replace('apifox-sync-pull-', '').replace('.json', '')
     actual_folder = folder_safe.replace('__', '/')
 
-    # 构建目标路径：.claude/apis/{实际文件夹路径}.json
-    # 最后一段作为文件名，前面的段作为目录
+    if actual_folder not in approved:
+        os.remove(tmp_path)
+        skipped_files.append(actual_folder)
+        continue
+
+    # 构建目标路径
     parts = actual_folder.rsplit('/', 1)
     if len(parts) == 2:
         parent_dir = os.path.join(apis_dir, parts[0])
@@ -287,6 +439,8 @@ for tmp_path in sorted(glob.glob(f'{tmpprefix}pull-*.json')):
 
 for folder, rel_path in saved_files:
     print(f'SAVED: "{folder}" → {rel_path}')
+for folder in skipped_files:
+    print(f'SKIP : "{folder}" （用户未勾选，本地保持不变）')
 PYEOF
 ```
 
@@ -315,6 +469,8 @@ PYEOF
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 TMPDIR="${PROJECT_ROOT}/.claude/.tmp"
-rm -f "${TMPDIR}/apifox-sync-export.json"
+rm -f "${TMPDIR}/apifox-sync-export.json" \
+      "${TMPDIR}/apifox-sync-pull-diff.json" \
+      "${TMPDIR}/apifox-sync-pull-approved.json"
 find "${TMPDIR}" -maxdepth 1 -name "apifox-sync-pull-*.json" -delete 2>/dev/null
 ```

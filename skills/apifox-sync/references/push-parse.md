@@ -48,6 +48,9 @@ print(f'PID={p}')
 - 包含 `@RestController` 注解，或同时包含 `@Controller` 和 `@ResponseBody` 注解
 
 提取类级信息：
+- **包名**：文件首行 `package xxx.yyy.zzz;` 中的包名。
+- **简单类名**：`public class XxxController` 中的类名。
+- **全限定类名**：`包名 + "." + 简单类名`（如 `com.example.user.UserController`）。用于稳定锚点 `x-source-controller`。
 - **路径前缀**：类上的 `@RequestMapping("/xxx")` 的值。如果没有类级 `@RequestMapping`，前缀为空字符串。
 - **Tag 名称**：类名（去掉 `Controller` 后缀），如 `PersonController` → `Person`
 
@@ -68,6 +71,18 @@ print(f'PID={p}')
 ## 步骤 5：提取方法信息
 
 对每个定位到的方法，提取：
+
+### 5.0 方法锚点（用于死接口追踪）
+
+这些字段会在步骤 9 写入 OpenAPI spec，作为 push/pull 同步时识别"同一个接口"的稳定标识，path/method 变更时仍能匹配到旧接口：
+
+- **方法名**：Java 方法名（如 `updateUser`）。
+- **方法签名键 `sourceMethodFq`**：`{全限定类名}#{方法名}`（如 `com.example.user.UserController#updateUser`）。
+  - 同一个类里有重载方法时，追加参数类型简名以区分：`com.example.user.UserController#updateUser(Long,UserReq)`。
+  - 这是 push 分类时用来匹配 Apifox 远程接口的**主锚点**。
+- **operationId**：由 `简单类名 + "_" + 方法名` 生成，符合 OpenAPI `^[A-Za-z_][A-Za-z0-9_]*$` 规则（如 `UserController_updateUser`）。
+  - 重载时追加数字后缀：`UserController_updateUser_2`。
+  - 仅作为 OpenAPI 标准字段暴露，真正用于匹配的仍是 `x-source-method-fq`。
 
 ### 5.1 接口名称
 

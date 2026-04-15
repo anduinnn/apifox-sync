@@ -9,7 +9,10 @@
   },
   "endpoints": {
     "exportOpenapi": "/projects/${PROJECT_ID}/export-openapi",
-    "importOpenapi": "/projects/${PROJECT_ID}/import-openapi"
+    "importOpenapi": "/projects/${PROJECT_ID}/import-openapi",
+    "_deleteApiNote": "deleteApi 使用的 baseUrl 与上面两个端点不同：/api/v1/ 而非 /v1/（Apifox 开放 API 接口管理系列），首次使用若返回 404，改为用 baseUrl 的 /v1/ 路径重试",
+    "deleteApi": "https://api.apifox.com/api/v1/projects/${PROJECT_ID}/http-apis/${API_ID}",
+    "deleteApiFallback": "https://api.apifox.com/v1/projects/${PROJECT_ID}/http-apis/${API_ID}"
   },
   "projectUrl": "https://app.apifox.com/project/${PROJECT_ID}",
   "_tempFilePrefixNote": "临时文件前缀由 Bash 运行时计算为 ${PROJECT_ROOT}/.claude/.tmp/apifox-sync-，并通过环境变量 TMPPREFIX 传递给子进程",

@@ -97,9 +97,12 @@ python3 -c "import json; json.load(open('${TMPPREFIX}spec.json')); print('JSON_V
 
 Apifox 以 path+method 为匹配键。为支持**同 path+method 在不同文件夹中作为独立接口**，需要按文件夹匹配情况分批推送。
 
-### 11.1 构建现有接口查找表
+### 11.1 构建双向索引
 
-复用步骤 8 导出的 `${TMPPREFIX}export.json`，提取每个 operation 的 `{method}:{path}` → `x-apifox-folder` 映射：
+复用步骤 8 导出的 `${TMPPREFIX}export.json`，同时建立两个查找表：
+
+1. **path+method 索引** `existing`：`{METHOD}:{path}` → `[folders]`，用于判断跨文件夹冲突
+2. **源码锚点索引** `by_source`：`x-source-method-fq` → `{path, method, folder, apifox_id}`，用于识别同一 Java 方法 path/method 变更
 
 ```bash
 python3 -c "
@@ -107,21 +110,56 @@ import json, re
 raw = open('${TMPPREFIX}export.json').read()
 raw = re.sub(r'\\\\(?![\"\\\\\/bfnrtu])', r'\\\\\\\\', raw)
 data = json.loads(raw, strict=False)
+
+def extract_apifox_id(detail):
+    # 优先 x-apifox-id（如果将来 Apifox 放回来了）
+    aid = detail.get('x-apifox-id')
+    if aid:
+        return str(aid)
+    # 降级：从 x-run-in-apifox URL 里提取，格式 .../apis/api-{id}-run
+    run_url = detail.get('x-run-in-apifox', '')
+    m = re.search(r'/apis/api-(\d+)(?:-run|$)', run_url)
+    return m.group(1) if m else None
+
 existing = {}
+by_source = {}
 for path, methods in data.get('paths', {}).items():
     for method, detail in methods.items():
-        if isinstance(detail, dict):
-            folder = detail.get('x-apifox-folder', '')
-            key = f'{method.upper()}:{path}'
-            existing.setdefault(key, []).append(folder)
+        if not isinstance(detail, dict):
+            continue
+        folder = detail.get('x-apifox-folder', '')
+        key = f'{method.upper()}:{path}'
+        existing.setdefault(key, []).append(folder)
+        source_fq = detail.get('x-source-method-fq')
+        if source_fq:
+            by_source[source_fq] = {
+                'path': path,
+                'method': method.upper(),
+                'folder': folder,
+                'apifox_id': extract_apifox_id(detail),
+                'controller': detail.get('x-source-controller', ''),
+                'summary': detail.get('summary', '')
+            }
 json.dump(existing, open('${TMPPREFIX}existing.json', 'w'))
-print(f'已索引 {len(existing)} 个现有接口')
+json.dump(by_source, open('${TMPPREFIX}by-source.json', 'w'), ensure_ascii=False)
+print(f'已索引 {len(existing)} 个现有接口，其中 {len(by_source)} 个带源码锚点')
 "
 ```
 
-### 11.2 分批生成 payload
+> **Apifox 行为注记**：Apifox 的 export-openapi 不会输出 `x-apifox-id`，但会输出 `x-run-in-apifox`（形如 `https://app.apifox.com/web/project/{pid}/apis/api-{id}-run`），`extract_apifox_id` 从这个 URL 用正则提取接口 ID。这是 `DELETE /http-apis/{id}` 能工作的**必要前提**——如果某接口没有 `x-run-in-apifox`，说明它可能是旧版本接口或手工创建的未落库状态，该条不能自动删除，11.4 需在报告中显式列出。
 
-读取生成的 spec 和查找表，将 operations 分为三类：安全更新、新建、冲突跳过。各自生成独立的 OpenAPI spec（共享 info 和 components/schemas）：
+### 11.2 分类并生成 payload
+
+读取生成的 spec 和双索引，将 operations 分为四类：
+
+| 类别 | 判定条件 | 后续动作 |
+|------|---------|---------|
+| **update** | 源码锚点命中 & 远程 path+method 与 spec 相同 | 归入更新批次（`AUTO_MERGE`） |
+| **rename** | 源码锚点命中 & 远程 path/method 与 spec 不同 | 输出到死接口确认清单（11.3） |
+| **create** | 源码锚点未命中 & 目标文件夹中无同 path+method | 归入新建批次（`CREATE_NEW`） |
+| **skip** | 目标文件夹中已有同 path+method，且其他文件夹也有 | 列为跨文件夹冲突，跳过 |
+
+没有锚点的老数据降级到原有 path+method 匹配逻辑，保证平滑升级。
 
 ```bash
 python3 << 'PYEOF'
@@ -130,19 +168,47 @@ import json, copy, os
 tmpprefix = os.environ['TMPPREFIX']
 spec = json.load(open(f'{tmpprefix}spec.json'))
 existing = json.load(open(f'{tmpprefix}existing.json'))
+by_source = json.load(open(f'{tmpprefix}by-source.json'))
 
-update_paths = {}   # 目标文件夹中已存在，且无其他文件夹重复 → 安全更新
-create_paths = {}   # 目标文件夹中不存在 → 新建
-skipped = []        # 目标文件夹中已存在，但其他文件夹也有同 path+method → 跳过
+update_paths = {}   # AUTO_MERGE 批次
+create_paths = {}   # CREATE_NEW 批次
+rename_list  = []   # 待用户确认的死接口 [{source_fq, old, new, apifox_id, summary}]
+skipped      = []   # 跨文件夹冲突
 
 for path, methods in spec.get('paths', {}).items():
     for method, detail in methods.items():
         if not isinstance(detail, dict):
             continue
         target_folder = detail.get('x-apifox-folder', '')
+        source_fq = detail.get('x-source-method-fq')
         key = f'{method.upper()}:{path}'
-        existing_folders = existing.get(key, [])
 
+        # 1) 先按源码锚点匹配
+        if source_fq and source_fq in by_source:
+            prev = by_source[source_fq]
+            if prev['path'] == path and prev['method'] == method.upper():
+                # path/method 都没变 → 走正常更新逻辑，继续做跨文件夹冲突检查
+                existing_folders = existing.get(key, [])
+                other_folders = [f for f in existing_folders if f != target_folder]
+                if target_folder in existing_folders and other_folders:
+                    skipped.append(f'{method.upper()} {path} (目标: {target_folder}, 冲突: {", ".join(other_folders)})')
+                else:
+                    update_paths.setdefault(path, {})[method] = detail
+            else:
+                # path 或 method 变了 → 重命名候选
+                rename_list.append({
+                    'source_fq': source_fq,
+                    'old': {'path': prev['path'], 'method': prev['method'], 'folder': prev['folder']},
+                    'new': {'path': path, 'method': method.upper(), 'folder': target_folder},
+                    'apifox_id': prev['apifox_id'],
+                    'summary': prev.get('summary') or detail.get('summary', '')
+                })
+                # 新接口先放到 create_paths（删除旧接口的动作在 11.3 决定）
+                create_paths.setdefault(path, {})[method] = detail
+            continue
+
+        # 2) 无锚点：降级到原有 path+method 匹配
+        existing_folders = existing.get(key, [])
         if target_folder in existing_folders:
             other_folders = [f for f in existing_folders if f != target_folder]
             if other_folders:
@@ -176,10 +242,20 @@ if create_paths:
     payload = build_payload(build_spec(spec, create_paths), 'CREATE_NEW', True)
     json.dump(payload, open(f'{tmpprefix}payload-create.json', 'w'), ensure_ascii=False)
 
+if rename_list:
+    json.dump(rename_list, open(f'{tmpprefix}rename-list.json', 'w'), ensure_ascii=False)
+
 update_count = sum(len(m) for m in update_paths.values())
 create_count = sum(len(m) for m in create_paths.values())
 print(f'更新批次: {update_count} 个接口')
 print(f'新建批次: {create_count} 个接口')
+print(f'重命名候选(死接口待确认): {len(rename_list)} 个')
+for r in rename_list:
+    old, new = r['old'], r['new']
+    tag = r.get('summary') or r['source_fq']
+    print(f'  · {tag}')
+    print(f'    旧: {old["method"]} {old["path"]}  (folder={old["folder"]})')
+    print(f'    新: {new["method"]} {new["path"]}  (folder={new["folder"]})')
 if skipped:
     print(f'跳过(冲突): {len(skipped)} 个接口')
     for s in skipped:
@@ -188,7 +264,92 @@ if skipped:
 PYEOF
 ```
 
-### 11.3 分别推送
+### 11.3 死接口用户确认
+
+如果步骤 11.2 生成了 `${TMPPREFIX}rename-list.json`，说明存在"源码里同一个方法，但 path/method 已变更"的接口。这些就是即将残留的"死接口"。
+
+**Apifox 的 import-openapi 无法按 operationId 精确更新跨 path 的接口**，所以必须通过独立的 DELETE 调用清理旧接口，否则它会原地不动。
+
+用 `AskUserQuestion` 让用户决定：
+
+```
+检测到 {N} 个接口路径/method 发生变更，旧接口会变成死文档：
+  · UserController#updateUser
+    旧: PUT /api/users  (folder=用户管理)
+    新: PUT /api/users/{id}  (folder=用户管理)
+  · UserController#listUsers
+    旧: GET /api/user/list  (folder=用户管理)
+    新: GET /api/users  (folder=用户管理)
+
+如何处理？
+  [ ] 全部删除旧接口
+  [ ] 逐项选择（再次确认每一条）
+  [ ] 全部保留（只推送新接口，不清理旧的）
+```
+
+- **全部删除** → 走步骤 11.4，对 `rename-list.json` 中所有条目调用 DELETE
+- **逐项选择** → 再次用 `AskUserQuestion`（multiSelect 模式）给出每条的勾选项；把被勾选的过滤写回 `${TMPPREFIX}rename-confirmed.json`，未勾选的略过
+- **全部保留** → 写入空的 `${TMPPREFIX}rename-confirmed.json`（`[]`）
+
+如果某条的 `apifox_id` 为空（极少数老接口没有 `x-apifox-id`），跳过该条并在提示中说明"无法自动删除，请到 Apifox 手动处理"。
+
+Bash 伪代码（由 Claude 把 AskUserQuestion 的结果写入确认清单）：
+```bash
+# 如果 rename-list.json 存在但 rename-confirmed.json 未生成，说明用户选择了"全部保留"
+# 直接 cp 空数组
+if [ -f "${TMPPREFIX}rename-list.json" ] && [ ! -f "${TMPPREFIX}rename-confirmed.json" ]; then
+  echo '[]' > "${TMPPREFIX}rename-confirmed.json"
+fi
+```
+
+### 11.4 调用 DELETE 清理旧接口
+
+对 `${TMPPREFIX}rename-confirmed.json` 中每一条，通过 Apifox 开放 API 的"删除接口"端点清理。
+
+**重要**：此端点的 URL 前缀与 import/export 不同，baseUrl 是 `/api/v1/` 而非 `/v1/`。首次调用若返回 404，降级改用 fallback URL（见 `data/api-config.json` 的 `deleteApi` / `deleteApiFallback`）。
+
+**实现要点**：
+- 必须在**父 shell 内**直接 curl（不要生成独立 .sh 用 `bash` 子进程执行）。子 shell 默认拿不到父 shell 未 export 的变量，会导致 `Authorization: Bearer ` 空值 → Apifox 返回 403/401。
+- 用 python3 把确认清单铺成 `{id}\t{method} {path}` 格式，bash 用 `while read` 在当前 shell 迭代。
+
+```bash
+if [ -f "${TMPPREFIX}rename-confirmed.json" ]; then
+  while IFS=$'\t' read -r api_id label; do
+    if [ -z "$api_id" ]; then
+      echo "⚠️ 无 apifox_id，无法自动删除：${label}（请到 Apifox 手动清理）"
+      continue
+    fi
+    R=$(curl -s -o "${TMPPREFIX}del-response.out" -w "%{http_code}" -X DELETE \
+      "https://api.apifox.com/api/v1/projects/${PROJECT_ID}/http-apis/${api_id}" \
+      -H "Authorization: Bearer ${TOKEN}" \
+      -H "X-Apifox-Api-Version: 2024-03-28")
+    if [ "$R" = "404" ]; then
+      # 降级 fallback：/v1/ 前缀
+      R=$(curl -s -o "${TMPPREFIX}del-response.out" -w "%{http_code}" -X DELETE \
+        "https://api.apifox.com/v1/projects/${PROJECT_ID}/http-apis/${api_id}" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H "X-Apifox-Api-Version: 2024-03-28")
+    fi
+    echo "DELETE ${label} (id=${api_id}) -> HTTP ${R}"
+  done < <(python3 -c "
+import json, os
+tmp=os.environ['TMPPREFIX']
+for it in json.load(open(f'{tmp}rename-confirmed.json')):
+    aid=it.get('apifox_id') or ''
+    print(f\"{aid}\t{it['old']['method']} {it['old']['path']}\")
+")
+fi
+```
+
+**状态码处理**：
+- `200` / `204` → 删除成功
+- `302` / `404` → 接口已不存在（可能被后台删过了，或本次 push 中被重复确认），视为成功
+- `401` / `403` → Token 失效或无权限（需要"项目维护者"角色才能删除接口），提示用户在 Apifox 控制台确认 Token 权限
+- 其他 → 在最终报告里列出"删除失败清单"，提示用户手动处理
+
+> **实测说明**：Apifox 的 DELETE 端点在删除**已不存在**的接口时会返回 HTTP 302（重定向），这不是真正的重定向，而是"目标已失效"的一种信号。因此把 302 与 404 同等对待。
+
+### 11.5 分别推送
 
 对每个非空批次执行推送。用 Bash 检查 payload 文件是否存在，存在则推送：
 
@@ -229,11 +390,33 @@ fi
 ## 步骤 12：报告结果
 
 推送成功时报告：
-- 推送的接口数量（paths 中的 operation 数）
+- 更新批次、新建批次的接口数量
+- 删除的旧接口数量（若 11.4 有执行）
+- 跳过的跨文件夹冲突数量
 - 目标文件夹名称（如选择了文件夹）
 - Apifox 项目链接：`https://app.apifox.com/project/${PROJECT_ID}`
 
+示例格式：
+```
+推送完成（目标文件夹：用户管理）
+  · 更新 3 个接口
+  · 新建 1 个接口
+  · 清理 2 个死接口（path 变更）
+  · 跳过 0 个跨文件夹冲突
+项目链接：https://app.apifox.com/project/${PROJECT_ID}
+```
+
+如果 11.4 有删除失败的条目，单独列出：
+```
+⚠️ 以下旧接口未能自动删除，请到 Apifox 手动清理：
+  · PUT /api/users (HTTP 500)
+```
+
 清理临时文件：
 ```bash
-rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json "${TMPPREFIX}"existing.json "${TMPPREFIX}"payload-update.json "${TMPPREFIX}"payload-create.json
+rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json \
+      "${TMPPREFIX}"existing.json "${TMPPREFIX}"by-source.json \
+      "${TMPPREFIX}"payload-update.json "${TMPPREFIX}"payload-create.json \
+      "${TMPPREFIX}"rename-list.json "${TMPPREFIX}"rename-confirmed.json \
+      "${TMPPREFIX}"del-response.out
 ```
