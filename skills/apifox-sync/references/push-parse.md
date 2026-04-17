@@ -22,22 +22,13 @@
 2. `APIFOX_PROJECT_ID` 环境变量 → ProjectId
 3. `${PROJECT_ROOT}/.claude/apifox.json` 的 `apiToken` / `projectId`
 
-读取配置文件时用 Bash，**不要将 Token 明文输出到终端**：
+调用 `load_config.py`（stdout 两行 `HAS_TOKEN=yes|no` + `PID=<id>`，脚本严禁回显 Token）：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-python3 -c "
-import json,os
-cfg = {}
-try: cfg = json.load(open(os.path.join('${PROJECT_ROOT}', '.claude', 'apifox.json')))
-except: pass
-t = os.environ.get('APIFOX_API_TOKEN', cfg.get('apiToken', ''))
-p = os.environ.get('APIFOX_PROJECT_ID', cfg.get('projectId', ''))
-print(f'HAS_TOKEN={\"yes\" if t else \"no\"}')
-print(f'PID={p}')
-" 2>/dev/null
+eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 ```
 
-将 Token 和 ProjectId 保存为后续 Bash 调用中的 shell 变量（通过读取配置文件赋值，不回显 Token）。
+Token 本体由 Claude 对话层读 `.claude/apifox.json` 的 `apiToken`（或 `$APIFOX_API_TOKEN`）赋值给 `TOKEN`；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。
 
 如果 Token 或 ProjectId 为空，**不要提示用户手动运行 init**，而是自动进入初始化流程：读取 `references/init.md` 并执行其中的步骤 2-4（收集凭证、验证连通性、保存配置）。完成后将获取到的 Token 和 ProjectId 赋值给 shell 变量，继续执行下方的推送步骤。
 

@@ -13,28 +13,20 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 
 检查是否已有配置（按优先级），**不要将 Token 明文输出到终端**：
 
-1. 用 Bash 检查环境变量（仅检查是否存在，不输出 Token 值）：
+调用 `load_config.py`（env 优先，回落 `.claude/apifox.json`，stdout 两行 `HAS_TOKEN=yes|no` + `PID=<id>`，脚本严禁回显 Token）：
 ```bash
-echo "HAS_TOKEN=${APIFOX_API_TOKEN:+yes}" && echo "PID=${APIFOX_PROJECT_ID:-}"
+eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
+echo "HAS_TOKEN=$HAS_TOKEN"
+echo "PID=$PID"
 ```
 
-2. 用 Bash 读取项目配置文件（仅输出是否存在和 ProjectId，不输出 Token 值）：
-```bash
-cat "${PROJECT_ROOT}/.claude/apifox.json" 2>/dev/null | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-print(f'HAS_TOKEN={\"yes\" if d.get(\"apiToken\") else \"no\"}')
-print(f'PID={d.get(\"projectId\",\"\")}')
-" 2>/dev/null || echo "NO_CONFIG"
-```
-
-如果已有有效配置，告知用户"已检测到现有配置（Token: 已配置, ProjectId: {值}）"并询问是否覆盖。
+如果 `HAS_TOKEN=yes`，告知用户"已检测到现有配置（Token: 已配置, ProjectId: ${PID}）"并询问是否覆盖。
 
 ## 步骤 2：收集凭证
 
 用 `AskUserQuestion` 收集 API Token：
 - 提示：从 Apifox 头像 → 账号设置 → API 访问令牌 → 新建令牌
-- 格式：`afxp_xxxxxxxxxx`
+- 格式：`afxp_...`（以 `afxp_` 开头的访问令牌）
 - 建议选择"永不过期"
 
 用 `AskUserQuestion` 收集 Project ID：
@@ -72,17 +64,16 @@ echo "HTTP_CODE=$HTTP_CODE"
 
 ## 步骤 4：保存配置
 
-验证成功后，用 Bash 写入项目级配置（在同一 shell 调用中使用 TOKEN 和 PROJECT_ID 变量）：
+验证成功后，用 Bash heredoc 写入项目级配置（固定 argv，无需 `python3 -c`）：
 ```bash
 CONFIG_DIR="${PROJECT_ROOT}/.claude"
-CONFIG_FILE="${CONFIG_DIR}/apifox.json"
 mkdir -p "$CONFIG_DIR"
-python3 -c "
-import json
-d = {'apiToken': '${TOKEN}', 'projectId': '${PROJECT_ID}'}
-json.dump(d, open('${CONFIG_FILE}', 'w'), indent=2)
-print('OK')
-"
+cat > "${CONFIG_DIR}/apifox.json" << EOF
+{
+  "apiToken": "${TOKEN}",
+  "projectId": "${PROJECT_ID}"
+}
+EOF
 ```
 
 提示用户：配置已保存到 `${PROJECT_ROOT}/.claude/apifox.json`，可使用 `/apifox-sync push` 推送接口。建议将 `.claude/apifox.json` 加入 `.gitignore`（因为包含 apiToken）。
