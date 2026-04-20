@@ -67,9 +67,9 @@ FEOF
 
 ---
 
-## 步骤 4：按目录导出 + 精简
+## 步骤 4：按接口切片 + 精简
 
-`pull_extract.py` 完成全部工作：按 `x-apifox-folder` 分组（精确 + 前缀匹配）→ 递归收集 schema 引用 → 精简扩展字段 → 每个实际文件夹写一个 `${TMPPREFIX}pull-<encoded>.json`（`encoded` 由 `path_codec.encode` 生成，`/` → `__`）。
+`pull_extract.py` 完成全部工作：按 `x-apifox-folder` 分组（精确 + 前缀匹配）→ **为每个接口单独生成一个切片** → 递归收集该接口引用的 schema → 精简扩展字段 → 每个接口写一个 `${TMPPREFIX}pull-op-<hash>.json`（`hash` 由 `api_path.hash_key(folder, METHOD, path)` 生成，sha1 前 16 位）。
 
 ```bash
 python3 skills/apifox-sync/scripts/pull_extract.py \
@@ -77,7 +77,9 @@ python3 skills/apifox-sync/scripts/pull_extract.py \
   "${TMPPREFIX}export.json"
 ```
 
-每个 folder 打印一行：`OK: "<folder>" — <N>接口, <M>Schema → <path>`。
+stdout 按 folder 分组打印：`-- folder: "<folder>" (N 个接口) --` 标题 + 每接口 `OK: "<folder>" — <METHOD> <path> (<M>Schema) → <path>`。结尾 `TOTAL: N 个接口分布在 K 个 folder`。
+
+> **为什么切到接口粒度**：folder 级聚合文件在接口多时很容易超过 Read 工具的单次读取上限。拆到接口粒度后，每个文件只含一个 operation + 它递归引用到的 schemas，AI 和人都能按需单独读取，互不干扰。
 
 ---
 
@@ -96,21 +98,22 @@ python3 skills/apifox-sync/scripts/pull_extract.py \
 
 ## 步骤 5.5：本地/远程 diff 预览
 
-落盘前先 diff，避免静默覆盖用户本地修改。
+落盘前先 diff，避免静默覆盖用户本地修改。**UX 仍按 folder 聚合提示**：虽然存储切到接口粒度，但用户心智模型依然是"选文件夹"。
 
 ```bash
 python3 skills/apifox-sync/scripts/pull_diff.py "$PROJECT_ROOT"
 ```
 
-脚本读 `${TMPPREFIX}pull-*.json`（排除 pull-diff.json / pull-approved.json）与本地 `.claude/apis/<folder>.json`，用 operation dict 相等比较，写 `${TMPPREFIX}pull-diff.json`，stdout 打印每 folder 的 `[NEW] / [SAME] / [DIFF]` 摘要（接口级 `+/~/-`）。
+脚本读 `${TMPPREFIX}pull-op-*.json` 所有接口切片 + 本地两种布局（优先读新布局 `.claude/apis/<folder>/<op_relpath>`，未命中回落到旧聚合 `.claude/apis/<folder>.json`），用 operation dict 相等比较，写 `${TMPPREFIX}pull-diff.json`（按 folder 聚合），stdout 打印每 folder 的 `[NEW] / [SAME] / [DIFF]` 摘要（接口级 `+/~/-`）。含 legacy 旧聚合文件时附加"将迁移旧文件并拆分为单接口文件"提示。
 
 解析摘要后用 `AskUserQuestion` 询问：
-- **全部覆盖**（推荐）→ move 所有临时文件到目标
-- **逐目录选择**（multiSelect）→ 仅覆盖勾选的，其他临时文件删除
+- **全部覆盖**（推荐）→ move 所有接口切片到目标、迁移旧 folder 文件
+- **逐目录选择**（multiSelect）→ 仅覆盖勾选的 folder，其他 folder 的切片删除
 - **取消** → 删除所有临时文件，中止
 
 特殊：
-- 全部 `nochange` → 跳过询问，提示"远程无变化"，进入步骤 7 清理
+- 全部 `nochange` 且 `legacy_file: false` → 跳过询问，提示"远程无变化"，进入步骤 7 清理
+- 全部 `nochange` 但 `legacy_file: true` → 仍询问（因为要做旧文件迁移）
 - 全部 `new-file`（首次 pull）→ 建议默认全部保存，可跳过询问
 
 写 `${TMPPREFIX}pull-approved.json`（actual_folder 字符串数组）：
@@ -133,24 +136,35 @@ APEOF
 
 ## 步骤 6：保存文件
 
-`pull_save.py` 按 approved 清单落盘：approved 中的 → move 到 `.claude/apis/<folder>.json`（含 `/` 时自动 `mkdir -p` 父目录），未勾选的 → 删除临时文件不写盘。
+`pull_save.py` 按 approved 清单落盘（每接口一个文件）：
 
-**路径映射**：
-- `分批测试/A` → `.claude/apis/分批测试/A.json`
-- `设备管理/无人机` → `.claude/apis/设备管理/无人机.json`
-- `用户管理` → `.claude/apis/用户管理.json`（无 `/` 直接作文件名）
+- approved 中的 folder：
+  1. 若存在旧聚合文件 `.claude/apis/<folder>.json` → 删除（迁移到新结构）
+  2. 把该 folder 所有接口切片 move 到 `.claude/apis/<folder>/<op_relpath>`
+  3. 扫描该 folder 目录下本地已有、但远程不再返回的接口文件 → 删除（远程已删除），并清理空父目录
+- 未 approve 的 folder：删除其所有接口切片临时文件
+
+`<op_relpath>` 由 `api_path.op_relpath(METHOD, path)` 生成，规则：
+- `path` 按 `/` 切段作为目录，末段追加 `.<METHOD>`，末尾加 `.json`
+- 根路径 `/` → `_root.<METHOD>.json`
+- path 段中的 Windows 非法字符 `<>:"|?*` 替换为 `_`，`{}` 保留
+
+**路径映射示例**：
+- folder=`设备管理/无人机`，POST `/api/device/list` → `.claude/apis/设备管理/无人机/api/device/list.POST.json`
+- folder=`设备管理/无人机`，GET `/api/device/{id}` → `.claude/apis/设备管理/无人机/api/device/{id}.GET.json`
+- folder=`用户管理`，GET `/` → `.claude/apis/用户管理/_root.GET.json`
 
 ```bash
 python3 skills/apifox-sync/scripts/pull_save.py "$PROJECT_ROOT"
 ```
 
-stdout 打印 `SAVED:` / `SKIP:` 行。
+stdout 按行打印 `SAVED:` / `REMOVED:` / `MIGRATED:` / `SKIP:`。
 
 ---
 
 ## 步骤 7：结果摘要与清理
 
-输出：拉取的目录数、每个目录的接口数、保存路径。
+输出：拉取的目录数、每个目录的接口数、保存路径。接口以独立文件落盘。
 
 示例：
 ```
@@ -158,10 +172,10 @@ stdout 打印 `SAVED:` / `SKIP:` 行。
 
 | 目录 | 接口数 | 保存路径 |
 |------|--------|---------|
-| 用户管理 | 5 | .claude/apis/用户管理.json |
-| 设备管理 | 8 | .claude/apis/设备管理.json |
+| 用户管理 | 5 | .claude/apis/用户管理/ |
+| 设备管理/无人机 | 8 | .claude/apis/设备管理/无人机/ |
 
-共拉取 2 个目录，13 个接口。
+共拉取 2 个目录，13 个接口文件。
 ```
 
 清理：
@@ -172,5 +186,5 @@ rm -f "${TMPPREFIX}export.json" \
       "${TMPPREFIX}folders.json" \
       "${TMPPREFIX}existing.json" \
       "${TMPPREFIX}by-source.json"
-find "${PROJECT_ROOT}/.claude/.tmp" -maxdepth 1 -name "apifox-sync-pull-*.json" -delete 2>/dev/null
+find "${PROJECT_ROOT}/.claude/.tmp" -maxdepth 1 -name "apifox-sync-pull-op-*.json" -delete 2>/dev/null
 ```

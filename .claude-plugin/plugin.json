@@ -1,6 +1,6 @@
 {
   "name": "apifox-sync",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Apifox 接口同步工具：推送 Spring Boot Controller 到 Apifox，或拉取 Apifox 接口定义到本地",
   "author": {
     "name": "anduinnn"

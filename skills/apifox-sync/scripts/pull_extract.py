@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按 folder 切片 + schema 递归收集 + 精简 → 每个子目录写一个临时 JSON。
+"""按接口切片 + schema 递归收集 + 精简 → 每个接口写一个临时 JSON。
 
 用法：
     python3 pull_extract.py --folders-file <folders_json> <export_json>
@@ -14,14 +14,19 @@ env:
     TMPPREFIX  临时文件前缀（必填）
 
 输出：
-    ${TMPPREFIX}pull-<encoded_folder>.json  每个 actual folder 一个精简 JSON
-    （encoded 由 path_codec.encode 生成，decode 反向可得原 folder 路径）
+    ${TMPPREFIX}pull-op-<hash>.json  每个接口一个精简 JSON
+    hash 由 api_path.hash_key(folder, method, path) 生成（sha1 前 16 位）。
 
-stdout 摘要（每 folder 一行）:
-    OK: "<actual_folder>" — <api_count>接口, <schema_count>Schema → <path>
+    每个 op 文件内部结构（标准 OpenAPI 片段 + x-apifox-folder 可读出 folder 归属）：
+      {
+        "paths": { "<path>": { "<method>": { ..., "x-apifox-folder": "<folder>" } } },
+        "components": { "schemas": { ... 仅该接口递归引用 } }
+      }
 
-等价替换 pull.md 步骤 4（含步骤 5 精简规则）内嵌 python3 逻辑。保持
-KEEP_EXTENSIONS 白名单、前缀匹配语义、schema 递归收集等与原实现一致。
+stdout 摘要（每接口一行）:
+    OK: "<folder>" — <METHOD> <path> (<schema_count>Schema) → <path>
+
+每个实际 folder 以 "-- folder: <folder> (<N> 个接口) --" 作为分隔行，便于人读。
 
 退出码：0 成功 / 1 运行时错误 / 2 参数用法错误
 """
@@ -34,9 +39,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-# 允许从同目录导入 path_codec
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import path_codec  # noqa: E402
+import api_path  # noqa: E402
 
 KEEP_EXTENSIONS = {"x-apifox-folder", "x-apifox-status", "x-apifox-enum"}
 
@@ -74,72 +78,92 @@ def collect_refs(obj, refs: set) -> None:
             collect_refs(item, refs)
 
 
+def resolve_all_refs(seed_refs: set, all_schemas: dict) -> set:
+    """从 seed_refs 出发递归解析所有传递依赖 schema 名。"""
+    refs = set(seed_refs)
+    resolved: set[str] = set()
+    queue = list(refs)
+    while queue:
+        name = queue.pop()
+        if name in resolved or name not in all_schemas:
+            continue
+        resolved.add(name)
+        new_refs: set[str] = set()
+        collect_refs(all_schemas[name], new_refs)
+        for n in new_refs:
+            if n not in refs:
+                refs.add(n)
+                queue.append(n)
+    return refs
+
+
 def run(folders: list[str], export_path: str, tmpprefix: str) -> int:
     data = load_export(export_path)
+    all_schemas = data.get("components", {}).get("schemas", {})
 
-    # 按实际 x-apifox-folder 分组
-    folder_groups: dict[str, dict] = {}
+    # 按实际 x-apifox-folder 分组 operation
+    # folder_ops: {folder: [(path, method, detail), ...]}
+    folder_ops: dict[str, list[tuple[str, str, dict]]] = {}
     for sel_folder in folders:
         for path, methods in data.get("paths", {}).items():
+            if not isinstance(methods, dict):
+                continue
             for method, detail in methods.items():
-                if isinstance(detail, dict):
-                    op_folder = detail.get("x-apifox-folder", "")
-                    if op_folder == sel_folder or op_folder.startswith(sel_folder + "/"):
-                        folder_groups.setdefault(op_folder, {}).setdefault(path, {})[method] = detail
+                if not isinstance(detail, dict):
+                    continue
+                op_folder = detail.get("x-apifox-folder", "")
+                if op_folder == sel_folder or op_folder.startswith(sel_folder + "/"):
+                    folder_ops.setdefault(op_folder, []).append((path, method, detail))
 
-    if not folder_groups:
+    if not folder_ops:
         print("WARN: 所选目录下未找到任何接口")
         return 0
 
-    all_schemas = data.get("components", {}).get("schemas", {})
+    total_ops = 0
+    for actual_folder in sorted(folder_ops.keys()):
+        ops = folder_ops[actual_folder]
+        print(f'-- folder: "{actual_folder}" ({len(ops)} 个接口) --')
+        for path, method, detail in ops:
+            # 1) 递归收集该接口需要的 schemas
+            seed: set[str] = set()
+            collect_refs(detail, seed)
+            needed = resolve_all_refs(seed, all_schemas)
+            filtered_schemas = {n: all_schemas[n] for n in needed if n in all_schemas}
 
-    for actual_folder in sorted(folder_groups.keys()):
-        filtered_paths = folder_groups[actual_folder]
+            # 2) 构造单接口切片
+            op_copy = detail  # 原数据本轮只读，clean 会修改，用原地引用即可
+            slice_paths = {path: {method: op_copy}}
+            clean_extensions(slice_paths)
+            clean_extensions(filtered_schemas)
 
-        # 递归收集 schema 引用
-        refs: set[str] = set()
-        collect_refs(filtered_paths, refs)
+            # 确保 x-apifox-folder 留在 operation 上（clean_extensions 因在白名单中已保留）
+            # 容错：若 operation 丢失 folder（不太可能），显式补回
+            if "x-apifox-folder" not in op_copy:
+                op_copy["x-apifox-folder"] = actual_folder
 
-        resolved: set[str] = set()
+            result = {
+                "paths": slice_paths,
+                "components": {"schemas": filtered_schemas},
+            }
 
-        def resolve_schema_refs(name: str) -> None:
-            if name in resolved or name not in all_schemas:
-                return
-            resolved.add(name)
-            collect_refs(all_schemas[name], refs)
-            for ref_name in list(refs):
-                if ref_name not in resolved:
-                    resolve_schema_refs(ref_name)
+            key = api_path.hash_key(actual_folder, method, path)
+            out_path = f"{tmpprefix}pull-op-{key}.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
 
-        for ref_name in list(refs):
-            resolve_schema_refs(ref_name)
+            print(
+                f'OK: "{actual_folder}" — {method.upper()} {path} '
+                f"({len(filtered_schemas)} Schema) → {out_path}"
+            )
+            total_ops += 1
 
-        filtered_schemas = {name: all_schemas[name] for name in refs if name in all_schemas}
-
-        clean_extensions(filtered_paths)
-        clean_extensions(filtered_schemas)
-
-        result = {
-            "paths": filtered_paths,
-            "components": {"schemas": filtered_schemas},
-        }
-
-        safe_name = path_codec.encode(actual_folder)
-        out_path = f"{tmpprefix}pull-{safe_name}.json"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-
-        api_count = sum(len(m) for m in filtered_paths.values())
-        schema_count = len(filtered_schemas)
-        print(f'OK: "{actual_folder}" — {api_count} 个接口, {schema_count} 个 Schema → {out_path}')
-
+    print(f"TOTAL: {total_ops} 个接口分布在 {len(folder_ops)} 个 folder")
     return 0
 
 
 def self_test() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="apifox-sync-selftest-"))
     try:
-        # fixture：两个 folder：普通 / 含 __ 的历史目录名 + 子目录前缀匹配
         fixture = {
             "paths": {
                 "/api/users": {
@@ -157,7 +181,11 @@ def self_test() -> int:
                                 }
                             }
                         },
-                    }
+                    },
+                    "post": {
+                        "summary": "创建",
+                        "x-apifox-folder": "分批测试",
+                    },
                 },
                 "/api/users/detail": {
                     "get": {
@@ -171,7 +199,6 @@ def self_test() -> int:
                         "x-apifox-folder": "历史__组",
                     }
                 },
-                # 不匹配的 folder
                 "/api/other": {"get": {"summary": "x", "x-apifox-folder": "其他"}},
             },
             "components": {
@@ -193,27 +220,46 @@ def self_test() -> int:
         rc = run(folders, str(export_path), prefix)
         assert rc == 0
 
-        # 验证 3 个切片文件：分批测试、分批测试/A（前缀匹配）、历史__组
-        f1 = Path(f"{prefix}pull-{path_codec.encode('分批测试')}.json")
-        f2 = Path(f"{prefix}pull-{path_codec.encode('分批测试/A')}.json")
-        f3 = Path(f"{prefix}pull-{path_codec.encode('历史__组')}.json")
-        assert f1.is_file(), f1
-        assert f2.is_file(), f2
-        assert f3.is_file(), f3
+        # 期望 4 个 op 文件：GET /api/users、POST /api/users、GET /api/users/detail、POST /api/legacy
+        key_get_users = api_path.hash_key("分批测试", "GET", "/api/users")
+        key_post_users = api_path.hash_key("分批测试", "POST", "/api/users")
+        key_detail = api_path.hash_key("分批测试/A", "GET", "/api/users/detail")
+        key_legacy = api_path.hash_key("历史__组", "POST", "/api/legacy")
 
-        d1 = json.loads(f1.read_text(encoding="utf-8"))
-        assert "/api/users" in d1["paths"]
-        # x-apifox-id 应被清理
-        assert "x-apifox-id" not in d1["paths"]["/api/users"]["get"]
-        # x-apifox-status 应保留
-        assert d1["paths"]["/api/users"]["get"]["x-apifox-status"] == "released"
-        # schema 递归收集：User + Role，但不含 Unused
-        assert set(d1["components"]["schemas"].keys()) == {"User", "Role"}
+        f_get = Path(f"{prefix}pull-op-{key_get_users}.json")
+        f_post = Path(f"{prefix}pull-op-{key_post_users}.json")
+        f_detail = Path(f"{prefix}pull-op-{key_detail}.json")
+        f_legacy = Path(f"{prefix}pull-op-{key_legacy}.json")
+        for p in (f_get, f_post, f_detail, f_legacy):
+            assert p.is_file(), p
 
-        d3 = json.loads(f3.read_text(encoding="utf-8"))
-        assert "/api/legacy" in d3["paths"]
-        # 不应包含其他 folder
-        assert "/api/other" not in d3["paths"]
+        # 不应有其他 folder（"其他"）的文件
+        other_key = api_path.hash_key("其他", "GET", "/api/other")
+        assert not Path(f"{prefix}pull-op-{other_key}.json").exists()
+
+        d_get = json.loads(f_get.read_text(encoding="utf-8"))
+        # 单接口结构
+        assert list(d_get["paths"].keys()) == ["/api/users"]
+        assert list(d_get["paths"]["/api/users"].keys()) == ["get"]
+        # 冗余扩展被清理
+        op_get = d_get["paths"]["/api/users"]["get"]
+        assert "x-apifox-id" not in op_get
+        assert op_get["x-apifox-folder"] == "分批测试"
+        assert op_get["x-apifox-status"] == "released"
+        # schema 递归：User + Role，不含 Unused
+        assert set(d_get["components"]["schemas"].keys()) == {"User", "Role"}
+
+        # 无 ref 的接口 schemas 为空
+        d_post = json.loads(f_post.read_text(encoding="utf-8"))
+        assert d_post["components"]["schemas"] == {}
+
+        # 子 folder 前缀匹配生效
+        d_detail = json.loads(f_detail.read_text(encoding="utf-8"))
+        assert d_detail["paths"]["/api/users/detail"]["get"]["x-apifox-folder"] == "分批测试/A"
+
+        # 历史含 __ 的 folder 正常
+        d_legacy = json.loads(f_legacy.read_text(encoding="utf-8"))
+        assert d_legacy["paths"]["/api/legacy"]["post"]["x-apifox-folder"] == "历史__组"
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -227,7 +273,6 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
         return self_test()
-    # 期望形态：--folders-file <path> <export_json>
     if len(argv) != 4 or argv[1] != "--folders-file":
         print(
             "Usage: pull_extract.py --folders-file <folders_json> <export_json> | -h | --self-test",

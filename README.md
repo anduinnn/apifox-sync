@@ -14,8 +14,12 @@ Claude Code 插件：Apifox 接口同步工具，支持双向操作。
 ### Pull — 从 Apifox 拉取接口定义
 
 - 从 Apifox 项目中按目录交互式拉取接口定义
-- 输出精简 OpenAPI JSON（仅保留 paths + schemas，去掉冗余元数据）
-- 本地目录结构与 Apifox 目录一致（如 `设备管理/无人机` → `.claude/apis/设备管理/无人机.json`）
+- 输出精简 OpenAPI JSON（仅保留单接口 paths + 递归引用的 schemas，去掉冗余元数据）
+- **以接口为维度落盘**（v1.3.0+），每个接口一个独立 JSON 文件，避免单文件过大读不完
+  - 文件路径：`.claude/apis/<folder>/<path-parts>.<METHOD>.json`
+  - 示例：`POST /api/device/list` @ folder `设备管理/无人机` → `.claude/apis/设备管理/无人机/api/device/list.POST.json`
+  - 示例：`GET /api/device/{id}` → `.claude/apis/设备管理/无人机/api/device/{id}.GET.json`
+- 老版本（v1.2.x）产出的 folder 级聚合文件（如 `设备管理/无人机.json`）在下一次 pull 选中对应 folder 时会**自动迁移**为新结构
 - 拉取后由用户自行决定后续操作（AI 对接、代码生成等）
 
 ## 安装
@@ -76,16 +80,16 @@ OpenCode 启动时会自动加载插件目录下的插件。
 
 ### Pull diff 预览（v1.2.0+）
 
-pull 时会先读本地 `.claude/apis/*.json`，与拉取回来的最新数据做 diff：
+pull 时会先扫描本地 `.claude/apis/`（新接口级布局优先，未命中回落到 v1.2.x 的 folder 聚合文件），与拉取回来的最新数据按 folder 聚合做 diff：
 
 ```
-[DIFF ] 用户管理  → .claude/apis/用户管理.json
+[DIFF ] 用户管理  → .claude/apis/用户管理/（将迁移旧文件并拆分为单接口文件）
     + POST /api/users/batch
     ~ PUT /api/users/{id}
     - GET /api/users/list  （远程已删除，本地将被清理）
 ```
 
-提供「全部覆盖 / 逐目录选择 / 取消」三种处理方式，不会再静默覆盖本地文件。
+提供「全部覆盖 / 逐目录选择 / 取消」三种处理方式，不会再静默覆盖本地文件。选中对应 folder 时会自动迁移老版本的 `<folder>.json` 聚合文件到新的接口级布局。
 
 ## 注意事项
 

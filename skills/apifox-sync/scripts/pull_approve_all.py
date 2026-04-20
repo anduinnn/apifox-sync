@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""glob ${TMPPREFIX}pull-*.json → 写 ${TMPPREFIX}pull-approved.json（全量 approved）。
+"""glob ${TMPPREFIX}pull-op-*.json → 写 ${TMPPREFIX}pull-approved.json（全量 approved folder 清单）。
 
 用法：
     python3 pull_approve_all.py
@@ -13,14 +13,12 @@ env:
     TMPPREFIX  临时文件前缀（必填）
 
 行为：
-    扫描所有 ${TMPPREFIX}pull-*.json（排除 pull-diff.json / pull-approved.json），
-    用 path_codec.decode 还原 folder 名，写入 ${TMPPREFIX}pull-approved.json 作为
-    字符串数组。
+    扫描所有 ${TMPPREFIX}pull-op-*.json（接口级切片），从每个切片里读取
+    operation.x-apifox-folder 去重后写入 ${TMPPREFIX}pull-approved.json 作为
+    字符串数组。"全部覆盖" 分支调用此脚本即可自动 approve 全部 folder。
 
 stdout:
     无（静默）
-
-等价替换 pull.md 步骤 5.5 "全部覆盖" 分支内嵌 python3 逻辑。
 
 退出码：0 成功 / 1 运行时错误 / 2 参数用法错误
 """
@@ -33,25 +31,35 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import path_codec  # noqa: E402
+
+def extract_folder(op_tmp_path: str) -> str | None:
+    try:
+        data = json.loads(Path(op_tmp_path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    paths = data.get("paths", {})
+    if not isinstance(paths, dict) or len(paths) != 1:
+        return None
+    path = next(iter(paths))
+    methods = paths[path]
+    if not isinstance(methods, dict) or len(methods) != 1:
+        return None
+    op = next(iter(methods.values()))
+    if not isinstance(op, dict):
+        return None
+    folder = op.get("x-apifox-folder")
+    return folder if isinstance(folder, str) else None
 
 
 def run(tmpprefix: str) -> int:
-    folders: list[str] = []
-    prefix_base = os.path.basename(tmpprefix)
-    for p in glob.glob(f"{tmpprefix}pull-*.json"):
-        if p.endswith("pull-diff.json") or p.endswith("pull-approved.json"):
-            continue
-        basename = os.path.basename(p)
-        encoded = basename
-        if encoded.startswith(prefix_base):
-            encoded = encoded[len(prefix_base):]
-        encoded = encoded.removeprefix("pull-").removesuffix(".json")
-        folders.append(path_codec.decode(encoded))
-    folders.sort()
+    folders: set[str] = set()
+    for p in glob.glob(f"{tmpprefix}pull-op-*.json"):
+        folder = extract_folder(p)
+        if folder is not None:
+            folders.add(folder)
+    out = sorted(folders)
     with open(f"{tmpprefix}pull-approved.json", "w", encoding="utf-8") as f:
-        json.dump(folders, f, ensure_ascii=False)
+        json.dump(out, f, ensure_ascii=False)
     return 0
 
 
@@ -60,16 +68,36 @@ def self_test() -> int:
     try:
         prefix = str(tmp) + "/apifox-sync-"
 
-        def write_tmp(folder: str) -> None:
-            enc = path_codec.encode(folder)
-            Path(f"{prefix}pull-{enc}.json").write_text("{}", encoding="utf-8")
+        def write_op(folder: str, method: str, path: str) -> None:
+            import hashlib
+            key = hashlib.sha1(
+                f"{folder}|{method}|{path}".encode("utf-8")
+            ).hexdigest()[:16]
+            data = {
+                "paths": {
+                    path: {
+                        method.lower(): {
+                            "summary": "t",
+                            "x-apifox-folder": folder,
+                        }
+                    }
+                },
+                "components": {"schemas": {}},
+            }
+            Path(f"{prefix}pull-op-{key}.json").write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8"
+            )
 
-        write_tmp("简单")
-        write_tmp("父/子")
-        write_tmp("历史__组")
-        # 故意放两个应被排除的 sentinel 文件
+        # 同一 folder 多接口 → 去重
+        write_op("简单", "GET", "/a")
+        write_op("简单", "POST", "/b")
+        # 含 / 与 __
+        write_op("父/子", "GET", "/c")
+        write_op("历史__组", "GET", "/d")
+
+        # 应被忽略的 sentinel 文件
         Path(f"{prefix}pull-diff.json").write_text("{}", encoding="utf-8")
-        Path(f"{prefix}pull-approved.json").write_text("{}", encoding="utf-8")
+        Path(f"{prefix}pull-approved.json").write_text("[]", encoding="utf-8")
 
         os.environ["TMPPREFIX"] = prefix
         rc = run(prefix)
@@ -80,6 +108,16 @@ def self_test() -> int:
         assert approved == sorted(["简单", "父/子", "历史__组"]), (
             f"approved unexpected: {approved!r}"
         )
+
+        # 空场景
+        for f in glob.glob(f"{prefix}pull-op-*.json"):
+            os.remove(f)
+        rc2 = run(prefix)
+        assert rc2 == 0
+        approved2 = json.loads(
+            Path(f"{prefix}pull-approved.json").read_text(encoding="utf-8")
+        )
+        assert approved2 == []
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
