@@ -31,14 +31,16 @@ def sanitize_backslashes(raw: str) -> str:
 
 
 def load_json_loose(path: str) -> dict:
-    """读取 JSON 文件。先严格解析；若遇非法反斜杠转义，做一次修正再解析。
+    """读取 JSON 文件。先用 `strict=False` 解析（允许字符串内控制字符）；
+    若遇非法反斜杠转义，对裸 `\\` 做一次修正再解析。
 
-    只在失败时做容错，避免对合法 JSON 的无谓改写。`strict=False` 允许控制字符，
-    与历史 `pull_extract.py::load_export` 行为保持一致。
+    Apifox 导出的 description/example 常含裸 `\\t`/`\\n`/`\\r`，严格模式会抛
+    `Invalid control character`；同时历史版本可能未正确转义用户输入的 `\\`，
+    产生 `Invalid \\escape`。两者都在此处统一容错。
     """
     raw = Path(path).read_text(encoding="utf-8")
     try:
-        return json.loads(raw)
+        return json.loads(raw, strict=False)
     except json.JSONDecodeError as e:
         if "Invalid \\escape" not in e.msg:
             raise
