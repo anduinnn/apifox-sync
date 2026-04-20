@@ -1,93 +1,82 @@
 #!/usr/bin/env python3
-"""接口级文件名编解码：(method, path) ↔ 相对文件路径。
+"""接口级文件名生成与解析。
 
 用法：
-    python3 api_path.py relpath <METHOD> <path>
-    python3 api_path.py split <relpath>
+    python3 api_path.py filename <summary> <METHOD> <path> [--with-method]
+    python3 api_path.py sanitize <name>
     python3 api_path.py hash <folder> <METHOD> <path>
     python3 api_path.py -h
     python3 api_path.py --self-test
 
-约定：
-    每个接口落盘为 `<apis_dir>/<folder>/<op_relpath>`，其中 op_relpath 规则：
-      - path 以 `/` 起始；按 `/` 切段，空段或根路径 `/` → 单段 `_root`
-      - 各段内将 Windows 非法字符 `<>:"|?*` 替换为 `_`（`{}` 保留，因 OpenAPI 路径参数常用）
-      - 末段追加 `.<METHOD>`
-      - 各段用 `/` 连接，末尾加 `.json`
+v1.4 命名规则：
+    每个接口落盘为 `<apis_dir>/<folder>/<filename>.json`，其中 filename 规则：
+      - 优先使用 operation.summary（去除非法字符、去首尾空白）
+      - summary 为空 → fallback 为 path 最后一段（清洗后）
+      - fallback 也为空（根路径）→ 固定用 "_root"
+      - 当 with_method=True 时，文件名末尾追加 `.<METHOD>`（冲突去重 / 用户显式要求）
 
     示例：
-      relpath("POST", "/api/device/list") == "api/device/list.POST.json"
-      relpath("GET",  "/api/device/{id}") == "api/device/{id}.GET.json"
-      relpath("GET",  "/")                == "_root.GET.json"
-      relpath("GET",  "")                 == "_root.GET.json"
+      filename("创建用户", "POST", "/api/users", False) == "创建用户.json"
+      filename("创建用户", "POST", "/api/users", True)  == "创建用户.POST.json"
+      filename("", "GET", "/api/users", False)          == "users.json"
+      filename("", "GET", "/", False)                   == "_root.json"
+      filename("a/b?c", "POST", "/x", False)            == "a_b_c.json"
 
-    split 为 relpath 的反解：
-      split("api/device/{id}.GET.json") == ("GET", "/api/device/{id}")
-      split("_root.GET.json")           == ("GET", "/")
+非法字符：Windows `<>:"|?*` + `/` + `\\` → 下划线；`{}` 保留。
 
-hash_key 提供一个稳定短 hash（sha1 前 16 位），用于临时文件名：
+hash_key 提供稳定短 hash（sha1 前 16 位），用于临时文件名：
     ${TMPPREFIX}pull-op-<hash>.json
+    key = folder|METHOD|path
 
 退出码：0 成功 / 1 运行时错误 / 2 参数用法错误
 """
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sys
-from typing import Tuple
+from pathlib import Path
+from typing import Optional
 
-# Windows 文件名非法字符（URL path 里罕见但做防御）。`{}` 在合法 filename 里允许，保留。
-_ILLEGAL = '<>:"|?*'
+# 文件名非法字符：合并 Windows 非法字符与 `/` `\\` （`/` 会切目录，必须替换）
+_ILLEGAL = '<>:"|?*/\\'
 
 # HTTP 方法白名单（OpenAPI 3.0 operation）
 _METHODS = {"get", "post", "put", "delete", "patch", "head", "options", "trace"}
 
 
-def _sanitize_segment(seg: str) -> str:
+def sanitize_filename(name: str) -> str:
+    """替换非法字符为下划线，去首尾空白/点，空则返回空串。"""
+    if name is None:
+        return ""
+    s = str(name)
     for ch in _ILLEGAL:
-        seg = seg.replace(ch, "_")
-    return seg
+        s = s.replace(ch, "_")
+    # 控制字符（0x00-0x1F）
+    s = "".join(c if ord(c) >= 32 else "_" for c in s)
+    s = s.strip().strip(".")
+    return s
 
 
-def op_relpath(method: str, path: str) -> str:
-    """(METHOD, /a/b/c) → 'a/b/c.METHOD.json'。空/根路径 → '_root.METHOD.json'。"""
-    method_up = method.upper()
+def _path_fallback(path: str) -> str:
+    """path 最后一段（清洗后）；空/根路径 → '_root'。"""
     parts = [p for p in (path or "").split("/") if p]
     if not parts:
-        parts = ["_root"]
-    parts = [_sanitize_segment(p) for p in parts]
-    parts[-1] = f"{parts[-1]}.{method_up}"
-    return "/".join(parts) + ".json"
+        return "_root"
+    return sanitize_filename(parts[-1]) or "_root"
 
 
-def split_op_relpath(relpath: str) -> Tuple[str, str]:
-    """'a/b/c.POST.json' → ('POST', '/a/b/c')；'_root.GET.json' → ('GET', '/')。
+def op_filename(summary: str, method: str, path: str, with_method: bool = False) -> str:
+    """按 v1.4 规则生成接口文件名（含 .json 后缀）。
 
-    只接受 op_relpath 产出的形态；不符合时抛 ValueError。
+    summary 空或清洗后为空 → 用 path 最后一段作为 fallback。
+    with_method=True → 在 stem 后追加 `.<METHOD>` 后缀（调用方决定是否去重）。
     """
-    if not relpath.endswith(".json"):
-        raise ValueError(f"not a .json file: {relpath!r}")
-    trimmed = relpath[: -len(".json")]
-    # 最后一个 `.` 之前是 path 最后一段，之后是 METHOD
-    dot = trimmed.rfind(".")
-    if dot < 0:
-        raise ValueError(f"missing METHOD suffix: {relpath!r}")
-    method = trimmed[dot + 1 :]
-    if method.lower() not in _METHODS:
-        raise ValueError(f"unknown method {method!r} in {relpath!r}")
-    path_part = trimmed[:dot]
-    if path_part == "_root":
-        return method.upper(), "/"
-    return method.upper(), "/" + path_part
-
-
-def is_op_file(relpath: str) -> bool:
-    """判断文件名是否符合 op 命名规则（用于扫描本地 apis 目录）。"""
-    try:
-        split_op_relpath(relpath)
-        return True
-    except ValueError:
-        return False
+    stem = sanitize_filename(summary) or _path_fallback(path)
+    if with_method:
+        stem = f"{stem}.{method.upper()}"
+    return f"{stem}.json"
 
 
 def hash_key(folder: str, method: str, path: str) -> str:
@@ -96,59 +85,165 @@ def hash_key(folder: str, method: str, path: str) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
 
+def parse_op_file(file_path: str) -> Optional[tuple[str, str, dict]]:
+    """读取本地 op 文件，返回 (METHOD, path, operation_dict)；非单接口切片/解析失败 → None。
+
+    新布局不再依赖文件名 → 一律通过文件内容的 paths 第一个 entry 来识别 (method, path)。
+    仅接受 paths 恰好含 1 条、method 恰好含 1 条的文件；否则视为非 op 文件。
+    """
+    try:
+        data = json.loads(Path(file_path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    paths = data.get("paths")
+    if not isinstance(paths, dict) or len(paths) != 1:
+        return None
+    path = next(iter(paths))
+    methods = paths[path]
+    if not isinstance(methods, dict) or len(methods) != 1:
+        return None
+    method = next(iter(methods))
+    if method.lower() not in _METHODS:
+        return None
+    op = methods[method]
+    if not isinstance(op, dict):
+        return None
+    return method.upper(), path, op
+
+
+def scan_folder_ops(folder_dir: str) -> list[dict]:
+    """扫描 folder 目录下所有 .json，返回 [{method, path, summary, operation, abs_path, filename}, ...]。
+
+    只识别单接口切片（paths 和 method 各 1 条）；其他 .json 忽略。
+    返回顺序不保证稳定（调用方按需排序）。
+    """
+    out: list[dict] = []
+    if not os.path.isdir(folder_dir):
+        return out
+    for root, _dirs, files in os.walk(folder_dir):
+        for fn in files:
+            if not fn.endswith(".json"):
+                continue
+            full = os.path.join(root, fn)
+            parsed = parse_op_file(full)
+            if parsed is None:
+                continue
+            method, path, op = parsed
+            summary = op.get("summary", "") if isinstance(op, dict) else ""
+            out.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "summary": summary if isinstance(summary, str) else "",
+                    "operation": op,
+                    "abs_path": full,
+                    "filename": os.path.relpath(full, folder_dir).replace(os.sep, "/"),
+                }
+            )
+    return out
+
+
 def _self_test() -> int:
-    # 基本 round-trip
-    cases = [
-        ("GET", "/"),
-        ("GET", ""),
-        ("POST", "/api/device/list"),
-        ("GET", "/api/device/{id}"),
-        ("PUT", "/api/device/{id}"),
-        ("DELETE", "/api/users/{id}/children/{cid}"),
-        ("PATCH", "/a"),
-    ]
-    expected_rel = {
-        ("GET", "/"): "_root.GET.json",
-        ("GET", ""): "_root.GET.json",
-        ("POST", "/api/device/list"): "api/device/list.POST.json",
-        ("GET", "/api/device/{id}"): "api/device/{id}.GET.json",
-        ("PUT", "/api/device/{id}"): "api/device/{id}.PUT.json",
-        ("DELETE", "/api/users/{id}/children/{cid}"): "api/users/{id}/children/{cid}.DELETE.json",
-        ("PATCH", "/a"): "a.PATCH.json",
-    }
-    for method, path in cases:
-        rel = op_relpath(method, path)
-        assert rel == expected_rel[(method, path)], (
-            f"relpath mismatch: {method} {path!r} → {rel!r}"
-        )
-        back_method, back_path = split_op_relpath(rel)
-        # 空字符串被标准化为根路径
-        expect_path = "/" if path in ("", "/") else path
-        assert back_method == method.upper(), f"method round-trip: {back_method}"
-        assert back_path == expect_path, (
-            f"path round-trip: {path!r} → {rel!r} → {back_path!r}"
-        )
+    # sanitize
+    assert sanitize_filename("hello") == "hello"
+    assert sanitize_filename("a/b") == "a_b"
+    assert sanitize_filename("接口名_v2") == "接口名_v2"
+    assert sanitize_filename("  spaced  ") == "spaced"
+    assert sanitize_filename("a?b*c<d>e|f:g\"h") == "a_b_c_d_e_f_g_h"
+    assert sanitize_filename("") == ""
+    assert sanitize_filename(None) == ""
+    assert sanitize_filename(".hidden.") == "hidden"
+    # 控制字符
+    assert sanitize_filename("a\x01b") == "a_b"
 
-    # Windows 非法字符替换
-    rel = op_relpath("GET", "/a:b/c?d/e|f")
-    assert rel == "a_b/c_d/e_f.GET.json", rel
-
-    # is_op_file
-    assert is_op_file("api/device/list.POST.json")
-    assert is_op_file("_root.GET.json")
-    assert not is_op_file("foo.json")  # 无 METHOD 段
-    assert not is_op_file("foo.BAR.json")  # 非 HTTP METHOD
-    assert not is_op_file("foo.txt")
+    # op_filename - summary 优先
+    assert op_filename("创建用户", "POST", "/api/users", False) == "创建用户.json"
+    assert op_filename("创建用户", "POST", "/api/users", True) == "创建用户.POST.json"
+    # 非法字符
+    assert op_filename("a/b?c", "GET", "/x", False) == "a_b_c.json"
+    # summary 为空 → fallback 到 path 末段
+    assert op_filename("", "GET", "/api/device/list", False) == "list.json"
+    assert op_filename("   ", "GET", "/api/device/{id}", False) == "{id}.json"
+    # 根路径 fallback
+    assert op_filename("", "GET", "/", False) == "_root.json"
+    assert op_filename("", "GET", "", False) == "_root.json"
+    # with_method on fallback
+    assert op_filename("", "POST", "/api/x", True) == "x.POST.json"
 
     # hash_key 稳定性 + 区分度
-    h1 = hash_key("设备管理/无人机", "POST", "/api/device/list")
-    h2 = hash_key("设备管理/无人机", "POST", "/api/device/list")
-    h3 = hash_key("设备管理/无人机", "GET", "/api/device/list")
+    h1 = hash_key("用户管理/基础", "POST", "/api/device/list")
+    h2 = hash_key("用户管理/基础", "POST", "/api/device/list")
+    h3 = hash_key("用户管理/基础", "GET", "/api/device/list")
     h4 = hash_key("设备管理", "POST", "/api/device/list")
     assert h1 == h2
     assert h1 != h3
     assert h1 != h4
     assert len(h1) == 16 and all(c in "0123456789abcdef" for c in h1)
+
+    # parse_op_file / scan_folder_ops
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="apifox-sync-api_path-selftest-"))
+    try:
+        ok = tmp / "创建用户.json"
+        ok.write_text(
+            json.dumps(
+                {
+                    "paths": {
+                        "/api/users": {
+                            "post": {
+                                "summary": "创建用户",
+                                "x-apifox-folder": "测试",
+                            }
+                        }
+                    },
+                    "components": {"schemas": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        parsed = parse_op_file(str(ok))
+        assert parsed is not None
+        method, path, op = parsed
+        assert method == "POST" and path == "/api/users"
+        assert op["summary"] == "创建用户"
+
+        # 非单接口切片
+        multi = tmp / "multi.json"
+        multi.write_text(
+            json.dumps({"paths": {"/a": {"get": {}}, "/b": {"get": {}}}}),
+            encoding="utf-8",
+        )
+        assert parse_op_file(str(multi)) is None
+
+        # 非 JSON
+        bad = tmp / "bad.json"
+        bad.write_text("not json", encoding="utf-8")
+        assert parse_op_file(str(bad)) is None
+
+        # scan
+        (tmp / "sub").mkdir()
+        nested = tmp / "sub" / "删除用户.json"
+        nested.write_text(
+            json.dumps(
+                {
+                    "paths": {
+                        "/api/users/{id}": {
+                            "delete": {"summary": "删除用户"}
+                        }
+                    },
+                    "components": {"schemas": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        ops = scan_folder_ops(str(tmp))
+        keys = sorted((o["method"], o["path"]) for o in ops)
+        assert keys == [("DELETE", "/api/users/{id}"), ("POST", "/api/users")], keys
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
     print("SELFTEST_OK")
     return 0
@@ -160,19 +255,27 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
         return _self_test()
-    if len(argv) >= 2 and argv[1] == "relpath" and len(argv) == 4:
-        print(op_relpath(argv[2], argv[3]))
+    if len(argv) >= 2 and argv[1] == "filename":
+        with_method = "--with-method" in argv
+        rest = [a for a in argv[2:] if a != "--with-method"]
+        if len(rest) != 3:
+            print(
+                "Usage: api_path.py filename <summary> <METHOD> <path> [--with-method]",
+                file=sys.stderr,
+            )
+            return 2
+        summary, method, path = rest
+        print(op_filename(summary, method, path, with_method))
         return 0
-    if len(argv) >= 2 and argv[1] == "split" and len(argv) == 3:
-        m, p = split_op_relpath(argv[2])
-        print(f"{m}\t{p}")
+    if len(argv) == 3 and argv[1] == "sanitize":
+        print(sanitize_filename(argv[2]))
         return 0
-    if len(argv) >= 2 and argv[1] == "hash" and len(argv) == 5:
+    if len(argv) == 5 and argv[1] == "hash":
         print(hash_key(argv[2], argv[3], argv[4]))
         return 0
     print(
-        "Usage: api_path.py relpath <METHOD> <path> | split <relpath> "
-        "| hash <folder> <METHOD> <path> | -h | --self-test",
+        "Usage: api_path.py filename <summary> <METHOD> <path> [--with-method] "
+        "| sanitize <name> | hash <folder> <METHOD> <path> | -h | --self-test",
         file=sys.stderr,
     )
     return 2

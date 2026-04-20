@@ -34,23 +34,20 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import api_path  # noqa: E402
+from json_safe import load_json_loose  # noqa: E402
 
 KEEP_EXTENSIONS = {"x-apifox-folder", "x-apifox-status", "x-apifox-enum"}
 
 
 def load_export(path: str) -> dict:
-    """读取 export.json，带 pull.md 里的 `\\` 容错修正。"""
-    with open(path, "r", encoding="utf-8") as f:
-        raw = f.read()
-    raw = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", raw)
-    return json.loads(raw, strict=False)
+    """读取 export.json，通过 json_safe 做 Apifox 非法 `\\` 容错。"""
+    return load_json_loose(path)
 
 
 def clean_extensions(obj) -> None:

@@ -26,9 +26,13 @@ HTTP_CODE=$(echo "$EXPORT_RESULT" | tail -1); BODY=$(echo "$EXPORT_RESULT" | sed
 
 HTTP：`200` → `echo "$BODY" > "${TMPPREFIX}export.json"`；`401/403` → 读 `references/init.md` 步骤 2-4 重配后重试；其他 → 中止。
 
-**文件夹枚举由 Claude 对话层完成**：Read `export.json`，遍历 `paths[*][*].x-apifox-folder` 去重排序（避免 heredoc 带来的非固定 argv）。
+**文件夹枚举由 `list_folders.py` 完成**（内置 Apifox 非法 `\` 转义容错，避免对话层内联 python 撞 `Invalid \escape`）：
+```bash
+python3 skills/apifox-sync/scripts/list_folders.py "${TMPPREFIX}export.json"
+```
+stdout 每行一个 folder 路径（按字典序；空行代表根目录）。对话层按行读入作为 `AskUserQuestion` 的候选。
 
-`AskUserQuestion` 选目标：现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建" 再问路径（`/` 多级）。空列表 → 直接问根目录或新建。
+`AskUserQuestion` 选目标：现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建" 再问路径（`/` 多级）。空输出 → 直接问根目录或新建。
 
 结果保存为 `TARGET_FOLDER` 传给步骤 9。Apifox 导入自动创建不存在的层级。
 

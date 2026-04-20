@@ -36,9 +36,13 @@ HTTP_CODE=$(echo "$EXPORT_RESULT" | tail -1); BODY=$(echo "$EXPORT_RESULT" | sed
 
 HTTP：`200` → `echo "$BODY" > "${TMPPREFIX}export.json"`；`401/403` → 读 `references/init.md` 步骤 2-4 重配后重试；其他 → 中止。
 
-**文件夹枚举由 Claude 对话层完成**：Read `export.json`，遍历 `paths[*][*].x-apifox-folder` 去重排序（避免 heredoc 非固定 argv）。
+**文件夹枚举由 `list_folders.py` 完成**（内置 Apifox 非法 `\` 转义容错，避免对话层内联 python 撞 `Invalid \escape`）：
+```bash
+python3 skills/apifox-sync/scripts/list_folders.py "${TMPPREFIX}export.json"
+```
+stdout 每行一个 folder 路径（按字典序；空行代表根目录）。对话层按行读入作为 `AskUserQuestion` 的候选。
 
-空列表 → 提示"项目中尚无接口"，中止。
+空输出 → 提示"项目中尚无接口"，中止。
 
 ---
 
@@ -81,6 +85,9 @@ stdout 按 folder 分组打印：`-- folder: "<folder>" (N 个接口) --` 标题
 
 > **为什么切到接口粒度**：folder 级聚合文件在接口多时很容易超过 Read 工具的单次读取上限。拆到接口粒度后，每个文件只含一个 operation + 它递归引用到的 schemas，AI 和人都能按需单独读取，互不干扰。
 
+> **v1.4 命名规则**：最终落盘路径 `.claude/apis/<Apifox folder 原样层级>/<接口名>.json`，不再按 URL path 展开目录。`<接口名>` 取 `operation.summary`，非法字符 `<>:"/\|?*` 替换为 `_`；同 folder 内两个接口 summary 清洗后相同时，冲突双方的文件名都追加 `.<METHOD>` 后缀（例 `用户.POST.json`/`用户.GET.json`）。summary 为空时回退到 path 最后一段；根路径回退到 `_root`。
+
+
 ---
 
 ## 步骤 5：精简规则（内聚到 pull_extract.py）
@@ -104,7 +111,12 @@ stdout 按 folder 分组打印：`-- folder: "<folder>" (N 个接口) --` 标题
 python3 skills/apifox-sync/scripts/pull_diff.py "$PROJECT_ROOT"
 ```
 
-脚本读 `${TMPPREFIX}pull-op-*.json` 所有接口切片 + 本地两种布局（优先读新布局 `.claude/apis/<folder>/<op_relpath>`，未命中回落到旧聚合 `.claude/apis/<folder>.json`），用 operation dict 相等比较，写 `${TMPPREFIX}pull-diff.json`（按 folder 聚合），stdout 打印每 folder 的 `[NEW] / [SAME] / [DIFF]` 摘要（接口级 `+/~/-`）。含 legacy 旧聚合文件时附加"将迁移旧文件并拆分为单接口文件"提示。
+**本地 ↔ 远程匹配方式**：不再依赖本地文件名（v1.3 按 URL path 拆目录的旧布局用户可能也想迁到新布局）。脚本递归扫描 `.claude/apis/<folder>/` 下所有 `.json`，**读取文件内部 `paths` 第一个 entry** → `(METHOD, path)`，与远端按 `(METHOD, path)` 对齐。v1.2 旧聚合文件 `.claude/apis/<folder>.json` 的多个接口也按同样方式展开，匹配上远端的会被重命名为新布局、未匹配上的算作远端已删除。
+
+stdout 打印 `[NEW] / [SAME] / [DIFF]` 摘要 + 每个 folder 的"**目标结构**"预览（最终每个接口落到什么文件名）。`${TMPPREFIX}pull-diff.json` 每 folder 含：
+- `new` / `updated` / `unchanged` / `removed`：接口级摘要，`updated` 条目若涉及重命名会带 `(重命名自 <旧文件名>)`；若来自 v1.2 旧聚合会带 `(拆分自 <xxx>.json(内部))`
+- `target_layout`：该 folder 最终的目标文件清单（供用户直观确认）
+- `legacy_file`：是否存在 v1.2 旧聚合文件
 
 解析摘要后用 `AskUserQuestion` 询问：
 - **全部覆盖**（推荐）→ move 所有接口切片到目标、迁移旧 folder 文件
@@ -139,20 +151,23 @@ APEOF
 `pull_save.py` 按 approved 清单落盘（每接口一个文件）：
 
 - approved 中的 folder：
-  1. 若存在旧聚合文件 `.claude/apis/<folder>.json` → 删除（迁移到新结构）
-  2. 把该 folder 所有接口切片 move 到 `.claude/apis/<folder>/<op_relpath>`
-  3. 扫描该 folder 目录下本地已有、但远程不再返回的接口文件 → 删除（远程已删除），并清理空父目录
+  1. 若存在 v1.2 旧聚合文件 `.claude/apis/<folder>.json` → 拆分其内部接口到临时占位文件后删除旧文件
+  2. 扫描该 folder 目录（含新布局 + 步骤 1 占位），建 `(METHOD, path) → 本地文件` 索引
+  3. 对远端每个接口：按 `<folder>/<接口名>.json` 计算目标；若同 `(METHOD, path)` 在本地是另一个文件名/路径 → 先删旧再写新；否则覆盖写入
+  4. 该 folder 本地存在、但远程不再返回的接口 → 删除，并递归清理 folder 内空子目录
 - 未 approve 的 folder：删除其所有接口切片临时文件
 
-`<op_relpath>` 由 `api_path.op_relpath(METHOD, path)` 生成，规则：
-- `path` 按 `/` 切段作为目录，末段追加 `.<METHOD>`，末尾加 `.json`
-- 根路径 `/` → `_root.<METHOD>.json`
-- path 段中的 Windows 非法字符 `<>:"|?*` 替换为 `_`，`{}` 保留
+**命名规则**（v1.4）：由 `api_path.op_filename(summary, method, path, with_method)` 生成：
+- `summary` 清洗非法字符后作为文件名主体
+- 同 folder 内多接口清洗后重名 → 冲突双方都追加 `.<METHOD>` 后缀
+- `summary` 为空 → 用 `path` 最后一段作为 fallback（根路径 `/` → `_root`）
 
-**路径映射示例**：
-- folder=`设备管理/无人机`，POST `/api/device/list` → `.claude/apis/设备管理/无人机/api/device/list.POST.json`
-- folder=`设备管理/无人机`，GET `/api/device/{id}` → `.claude/apis/设备管理/无人机/api/device/{id}.GET.json`
-- folder=`用户管理`，GET `/` → `.claude/apis/用户管理/_root.GET.json`
+**路径映射示例**（Apifox folder = `用户服务/v1/用户管理`）：
+- summary=`创建用户`，POST `/api/users`
+  → `.claude/apis/用户服务/v1/用户管理/创建用户.json`
+- summary=`用户`，POST `/api/users` + summary=`用户`，GET `/api/users/{id}` 冲突
+  → 双方都带 METHOD：`用户.POST.json` / `用户.GET.json`
+- summary=`` (空)，GET `/api/users` → `users.json`（path 末段）
 
 ```bash
 python3 skills/apifox-sync/scripts/pull_save.py "$PROJECT_ROOT"
@@ -173,7 +188,7 @@ stdout 按行打印 `SAVED:` / `REMOVED:` / `MIGRATED:` / `SKIP:`。
 | 目录 | 接口数 | 保存路径 |
 |------|--------|---------|
 | 用户管理 | 5 | .claude/apis/用户管理/ |
-| 设备管理/无人机 | 8 | .claude/apis/设备管理/无人机/ |
+| 订单管理/基础 | 8 | .claude/apis/订单管理/基础/ |
 
 共拉取 2 个目录，13 个接口文件。
 ```

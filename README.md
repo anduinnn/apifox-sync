@@ -16,10 +16,14 @@ Claude Code 插件：Apifox 接口同步工具，支持双向操作。
 - 从 Apifox 项目中按目录交互式拉取接口定义
 - 输出精简 OpenAPI JSON（仅保留单接口 paths + 递归引用的 schemas，去掉冗余元数据）
 - **以接口为维度落盘**（v1.3.0+），每个接口一个独立 JSON 文件，避免单文件过大读不完
-  - 文件路径：`.claude/apis/<folder>/<path-parts>.<METHOD>.json`
-  - 示例：`POST /api/device/list` @ folder `设备管理/无人机` → `.claude/apis/设备管理/无人机/api/device/list.POST.json`
-  - 示例：`GET /api/device/{id}` → `.claude/apis/设备管理/无人机/api/device/{id}.GET.json`
-- 老版本（v1.2.x）产出的 folder 级聚合文件（如 `设备管理/无人机.json`）在下一次 pull 选中对应 folder 时会**自动迁移**为新结构
+- **按 Apifox 文件夹层级组织**（v1.4.0+），文件名用接口的中文名（`operation.summary`）
+  - 文件路径：`.claude/apis/<Apifox folder 原样层级>/<接口名>.json`
+  - 示例：folder=`用户服务/v1/用户管理`，summary=`创建用户`（POST `/api/users`）
+    → `.claude/apis/用户服务/v1/用户管理/创建用户.json`
+  - 示例：同一 folder 内两个接口 summary 相同时，冲突双方文件名都追加 `.<METHOD>` 后缀
+    （如 `用户.POST.json` / `用户.GET.json`）
+  - 示例：summary 为空时，回退到 path 最后一段（如 `GET /api/users` → `users.json`）
+- 老版本产出（v1.2 `<folder>.json` 聚合 / v1.3 URL 路径展开目录）在下一次 pull 选中对应 folder 时会**自动迁移**为新结构（按文件内部 method+path 匹配，保证不误删用户修改）
 - 拉取后由用户自行决定后续操作（AI 对接、代码生成等）
 
 ## 安装
