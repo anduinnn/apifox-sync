@@ -145,7 +145,20 @@ def scan_folder_ops(folder_dir: str) -> list[dict]:
     return out
 
 
-def _self_test() -> int:
+def folder_dir(project_root: str, folder: str) -> str:
+    return os.path.join(project_root, ".claude", "apis", folder)
+
+
+def old_aggregate_path(project_root: str, folder: str) -> str:
+    """v1.2 旧布局：folder 含 `/` → A/B.json；无 `/` → A.json"""
+    apis_dir = os.path.join(project_root, ".claude", "apis")
+    parts = folder.rsplit("/", 1)
+    if len(parts) == 2:
+        return os.path.join(apis_dir, parts[0], parts[1] + ".json")
+    return os.path.join(apis_dir, folder + ".json")
+
+
+def self_test() -> int:
     # sanitize
     assert sanitize_filename("hello") == "hello"
     assert sanitize_filename("a/b") == "a_b"
@@ -254,7 +267,7 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
-        return _self_test()
+        return self_test()
     if len(argv) >= 2 and argv[1] == "filename":
         with_method = "--with-method" in argv
         rest = [a for a in argv[2:] if a != "--with-method"]
