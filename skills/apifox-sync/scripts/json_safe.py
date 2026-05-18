@@ -47,7 +47,7 @@ def load_json_loose(path: str) -> dict:
         return json.loads(sanitize_backslashes(raw), strict=False)
 
 
-def _self_test() -> int:
+def self_test() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="apifox-sync-selftest-jsonsafe-"))
     try:
         # 1) 合法 JSON 正常解析
@@ -94,7 +94,7 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
-        return _self_test()
+        return self_test()
     print("Usage: json_safe.py --self-test | -h", file=sys.stderr)
     return 2
 
