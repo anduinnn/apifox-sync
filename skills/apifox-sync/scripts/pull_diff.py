@@ -52,6 +52,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import api_path  # noqa: E402
+from api_path import folder_dir, old_aggregate_path  # noqa: E402
 
 
 # -------- 远端切片读取 --------
@@ -75,19 +76,6 @@ def read_remote_op(tmp_path: str) -> Optional[dict]:
 
 
 # -------- 本地布局读取 --------
-
-def old_aggregate_path(project_root: str, folder: str) -> str:
-    """v1.2 旧布局：folder 含 `/` → A/B.json；无 `/` → A.json"""
-    apis_dir = os.path.join(project_root, ".claude", "apis")
-    parts = folder.rsplit("/", 1)
-    if len(parts) == 2:
-        return os.path.join(apis_dir, parts[0], parts[1] + ".json")
-    return os.path.join(apis_dir, folder + ".json")
-
-
-def folder_dir(project_root: str, folder: str) -> str:
-    return os.path.join(project_root, ".claude", "apis", folder)
-
 
 def scan_local_ops(project_root: str, folder: str) -> dict[tuple[str, str], dict]:
     """本地视角：(METHOD, path) → {operation, source, filename}。

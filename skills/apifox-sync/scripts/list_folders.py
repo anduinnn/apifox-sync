@@ -57,7 +57,7 @@ def run(export_path: str) -> int:
     return 0
 
 
-def _self_test() -> int:
+def self_test() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="apifox-sync-selftest-listfolders-"))
     try:
         # 1) 正常：按字典序输出去重
@@ -111,7 +111,7 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
-        return _self_test()
+        return self_test()
     if len(argv) != 2:
         print("Usage: list_folders.py <export_json> | -h | --self-test", file=sys.stderr)
         return 2

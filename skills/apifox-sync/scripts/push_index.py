@@ -36,6 +36,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from json_safe import load_json_loose  # noqa: E402
+
 
 def extract_apifox_id(detail: dict) -> str | None:
     """优先 x-apifox-id；降级从 x-run-in-apifox URL 提取 api-{id}(-run)。"""
@@ -71,17 +74,8 @@ def build_index(data: dict) -> tuple[dict, dict]:
     return existing, by_source
 
 
-def load_export(path: str) -> dict:
-    """读取 export.json，带 push-api.md 里的 `\\` 容错修正。"""
-    with open(path, "r", encoding="utf-8") as f:
-        raw = f.read()
-    # 与 push-api.md 步骤 11.1 正则一致
-    raw = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", raw)
-    return json.loads(raw, strict=False)
-
-
 def run(export_json: str, tmpprefix: str) -> int:
-    data = load_export(export_json)
+    data = load_json_loose(export_json)
     if "paths" not in data:
         print("ERROR: export.json has no 'paths' field", file=sys.stderr)
         return 1
