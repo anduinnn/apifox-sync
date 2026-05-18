@@ -2,153 +2,81 @@
 
 ## 步骤 1：解析参数
 
-从 `{{ARGUMENTS}}` 中去掉 `push` 后解析剩余参数：
+从 `{{ARGUMENTS}}` 去掉 `push` 后解析：
+- `@path/to/Controller.java` → 整个 Controller（去掉 `@` 前缀）
+- `@path/to/Controller.java#L35` → 单个方法（`@` 到 `#L` 之间为路径，`#L` 后为行号）
 
-- `@path/to/Controller.java` → 整个 Controller（所有方法）
-  - 提取文件路径：去掉 `@` 前缀
-- `@path/to/Controller.java#L35` → 单个方法
-  - 提取文件路径：`@` 到 `#L` 之间
-  - 提取行号：`#L` 后的数字
-
-如果是相对路径，基于当前工作目录解析为绝对路径。
+相对路径基于当前工作目录解析为绝对路径。
 
 ## 步骤 2：加载配置
 
-先定位项目根目录（参见 SKILL.md 注意事项第 6 条）。
-
-按优先级读取（环境变量 > 项目配置文件）：
-
-1. `APIFOX_API_TOKEN` 环境变量 → Token
-2. `APIFOX_PROJECT_ID` 环境变量 → ProjectId
-3. `${PROJECT_ROOT}/.claude/apifox.json` 的 `apiToken` / `projectId`
-
-调用 `load_config.py`（stdout 两行 `HAS_TOKEN=yes|no` + `PID=<id>`，脚本严禁回显 Token）：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 ```
-
-Token 本体由 Claude 对话层读 `.claude/apifox.json` 的 `apiToken`（或 `$APIFOX_API_TOKEN`）赋值给 `TOKEN`；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。
-
-如果 Token 或 ProjectId 为空，**不要提示用户手动运行 init**，而是自动进入初始化流程：读取 `references/init.md` 并执行其中的步骤 2-4（收集凭证、验证连通性、保存配置）。完成后将获取到的 Token 和 ProjectId 赋值给 shell 变量，继续执行下方的推送步骤。
+`TOKEN` 由对话层从 `.claude/apifox.json` 的 `apiToken`（或 `$APIFOX_API_TOKEN`）赋值；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。Token 或 ProjectId 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
 
 ## 步骤 3：读取 Controller 文件
 
-用 Read 工具读取指定的 Controller 文件。验证：
-- 文件存在
-- 包含 `@RestController` 注解，或同时包含 `@Controller` 和 `@ResponseBody` 注解
-
-提取类级信息：
-- **包名**：文件首行 `package xxx.yyy.zzz;` 中的包名。
-- **简单类名**：`public class XxxController` 中的类名。
-- **全限定类名**：`包名 + "." + 简单类名`（如 `com.example.user.UserController`）。用于稳定锚点 `x-source-controller`。
-- **路径前缀**：类上的 `@RequestMapping("/xxx")` 的值。如果没有类级 `@RequestMapping`，前缀为空字符串。
-- **Tag 名称**：类名（去掉 `Controller` 后缀），如 `PersonController` → `Person`
+用 Read 工具读取 Controller 文件，验证含 `@RestController`（或 `@Controller` + `@ResponseBody`），提取：
+- **包名**：`package xxx.yyy.zzz;` 首行
+- **简单类名**：`public class XxxController`
+- **全限定类名**：`包名.简单类名`（用于锚点 `x-source-controller`）
+- **路径前缀**：类上 `@RequestMapping("/xxx")` 的值（无则为空）
+- **Tag 名称**：类名去掉 `Controller` 后缀
 
 ## 步骤 4：定位方法
 
-**整个 Controller 模式**：
-找出所有带以下注解的 public 方法：
-- `@GetMapping`
-- `@PostMapping`
-- `@DeleteMapping`
-- `@PutMapping`
-- `@PatchMapping`
-- `@RequestMapping(method = RequestMethod.XXX)`
+**整个 Controller 模式**：找所有带 `@GetMapping`/`@PostMapping`/`@DeleteMapping`/`@PutMapping`/`@PatchMapping`/`@RequestMapping(method=...)` 的 public 方法。
 
-**单个方法模式（指定行号）**：
-从指定行号向上查找最近的方法声明（最多 20 行），包括其上方的 JavaDoc 注释和映射注解。
+**单个方法模式**：从指定行号向上最多 20 行找最近方法声明（含 JavaDoc 和映射注解）。
 
 ## 步骤 5：提取方法信息
 
-对每个定位到的方法，提取：
+### 5.0 方法锚点
 
-### 5.0 方法锚点（用于死接口追踪）
+| 字段 | 格式 | 用途 |
+|------|------|------|
+| `sourceMethodFq` | `{fqcn}#{方法名}`，重载追加参数类型简名 | push 分类主匹配键（写入 `x-source-method-fq`） |
+| `operationId` | `{简单类名}_{方法名}`，重载追加数字后缀 | OpenAPI 标准字段 |
+| `x-source-controller` | 步骤 3 全限定类名 | 整 Controller 推送时的孤儿检测范围 |
 
-这些字段会在步骤 9 写入 OpenAPI spec，作为 push/pull 同步时识别"同一个接口"的稳定标识，path/method 变更时仍能匹配到旧接口：
-
-- **方法名**：Java 方法名（如 `updateUser`）。
-- **方法签名键 `sourceMethodFq`**：`{全限定类名}#{方法名}`（如 `com.example.user.UserController#updateUser`）。
-  - 同一个类里有重载方法时，追加参数类型简名以区分：`com.example.user.UserController#updateUser(Long,UserReq)`。
-  - 这是 push 分类时用来匹配 Apifox 远程接口的**主锚点**。
-- **operationId**：由 `简单类名 + "_" + 方法名` 生成，符合 OpenAPI `^[A-Za-z_][A-Za-z0-9_]*$` 规则（如 `UserController_updateUser`）。
-  - 重载时追加数字后缀：`UserController_updateUser_2`。
-  - 仅作为 OpenAPI 标准字段暴露，真正用于匹配的仍是 `x-source-method-fq`。
+`x-source-method-fq` 必须保证同一 Java 方法每次 push 生成完全相同的字符串。
 
 ### 5.1 接口名称
 
-从方法上方的 JavaDoc 注释 (`/** ... */`) 中提取描述：
-- 跳过空行和以 `@` 开头的标签行（如 `@param`、`@return`、`@deprecated`）
-- 取第一个有实际文字内容的行作为接口名称
-- 如果无 JavaDoc 或 JavaDoc 中无有效文字行，使用方法名
+从方法上方 JavaDoc (`/** ... */`) 取第一个有实际文字的行（跳过空行和 `@` 标签行）作为接口名称；无 JavaDoc 则用方法名。
 
 ### 5.2 HTTP 方法和路径
-- `@PostMapping("/xxx")` → POST, `/xxx`
-- `@GetMapping("/xxx")` → GET, `/xxx`
-- `@DeleteMapping("/xxx/{id}")` → DELETE, `/xxx/{id}`
-- `@PutMapping("/xxx")` → PUT, `/xxx`
-- `@PatchMapping("/xxx")` → PATCH, `/xxx`
-- `@RequestMapping(value="/xxx", method=RequestMethod.GET)` → GET, `/xxx`
-- 完整路径 = 类级前缀 + 方法级路径
+
+`@PostMapping("/xxx")` → `POST /xxx`，以此类推。完整路径 = 类级前缀 + 方法级路径。`@RequestMapping(value="/xxx", method=RequestMethod.GET)` → `GET /xxx`。
 
 ### 5.3 请求参数
 
-逐个分析方法的参数：
+| 注解/类型 | OpenAPI 映射 | 备注 |
+|-----------|-------------|------|
+| `@RequestBody ClassName` | requestBody, `$ref: ClassName` | `List<T>` → array of T |
+| `@PathVariable` | path parameter | `@PathVariable("alias")` 用括号内名称 |
+| `@RequestParam` | query parameter | `required=false`/`defaultValue` → `required:false` + `default`；`List<T>` → array + `style:form,explode:true` |
+| `@RequestHeader` | header parameter | `required` 处理同 `@RequestParam` |
+| `@CookieValue` | cookie parameter | — |
+| `@ModelAttribute ClassName` | 每字段展开为独立 query parameter | — |
+| `MultipartFile`（`@RequestParam`/`@RequestPart`） | `multipart/form-data`, `{type:string,format:binary}` | — |
+| 无注解参数 | query parameter（Spring 默认）| 在 `frameworkIgnored` 列表中则跳过 |
 
-**框架注入参数（跳过，不纳入 spec）**：
-参考 `data/type-mappings.json` 的 `frameworkIgnored` 列表。
-
-**`@RequestBody ClassName param`**：
-- 如果 ClassName 是 `List<T>`（如 `List<DeviceGroupSortReq>`）→ 请求体 schema 为 `{type: array, items: {$ref: T}}`
-- 如果 ClassName 是 `List<String>` / `List<Integer>` 等基础类型集合 → `{type: array, items: {type: string/integer}}`
-- 否则 → 读取 ClassName 源文件，提取所有字段作为 request body schema（见 `references/type-resolution.md`）
-
-**`@PathVariable Long id`**：
-- 作为 path parameter
-- 提取参数名和类型
-- 如果有 `@PathVariable("alias")`，使用括号内的名称
-
-**`@RequestParam String name`**：
-- 作为 query parameter
-- 提取参数名和类型
-- 如果有 `@RequestParam("alias")`，使用括号内的名称
-- `required` 属性处理：
-  - `@RequestParam(required = false)` → 参数 `required: false`
-  - `@RequestParam(defaultValue = "xxx")` → 参数 `required: false`，schema 中加 `default: "xxx"`
-  - 无 required/defaultValue 属性 → 默认 `required: true`
-- 如果参数类型是 `List<String>` / `List<Integer>` 等集合 → schema 为 `{type: array, items: {type: string/integer}}`，并设置 `style: form, explode: true`
-
-**`@RequestHeader("X-Custom") String header`**：
-- 作为 header parameter
-- 提取参数名（优先使用注解 value）和类型
-- `required` 属性处理同 `@RequestParam`
-
-**`@CookieValue("session") String cookie`**：
-- 作为 cookie parameter
-- 提取参数名和类型
-
-**`@ModelAttribute ClassName param`**：
-- 读取 ClassName 源文件，提取所有字段
-- 每个字段作为独立的 query parameter（而非 request body）
-
-**`@RequestParam("file") MultipartFile` / `@RequestPart("file") MultipartFile`**：
-- 请求体为 `multipart/form-data`
-- Schema: `{type: string, format: binary}`
-
-**无注解的参数**：
-- 如果参数类型在 `frameworkIgnored` 列表中 → 跳过
-- 否则 → 作为 query parameter（Spring 默认行为）
+框架注入参数（`HttpServletRequest` 等）参考 `data/type-mappings.json` 的 `frameworkIgnored` 列表，一律跳过。
 
 ### 5.4 响应类型
 
-提取方法返回类型：
-- `R<XxxVO>` → 使用 R 骨架模板，data 字段引用 XxxVO schema
-- `R<Page<XxxVO>>` → 使用 R 骨架 + Page 骨架，records 引用 XxxVO
-- `R<List<XxxVO>>` → 使用 R 骨架，data 字段为 `{type: array, items: {$ref: XxxVO}}`
-- `R<Void>` → 使用 R 骨架，data 字段设置 `nullable: true`，不生成 data schema
-- `R<Long>` / `R<String>` / `R<Boolean>` → 使用 R 骨架，data 字段为对应基础类型
-- `ResponseEntity<T>` → 提取泛型参数 T，按 T 的类型处理（等同于直接返回 T）
-- `void` → 不生成响应 schema
-- `SseEmitter` / 其他非 R 类型 → `{type: object}`
+| 返回类型 | schema 映射 |
+|----------|------------|
+| `R<XxxVO>` | R 骨架，data `$ref: XxxVO` |
+| `R<Page<XxxVO>>` | R 骨架 + Page 骨架，records `$ref: XxxVO` |
+| `R<List<XxxVO>>` | R 骨架，data `array of XxxVO` |
+| `R<Void>` | R 骨架，data `nullable:true` |
+| `R<Long/String/Boolean>` | R 骨架，data 对应基础类型 |
+| `ResponseEntity<T>` | 等同直接返回 T |
+| `void` | 不生成响应 schema |
+| `SseEmitter` / 其他 | `{type:object}` |
 
 骨架模板和泛型占位符替换规则参考 `data/framework-schemas.json`。
