@@ -29,67 +29,33 @@ Apifox 接口同步工具，支持双向操作：
 
 ## Push 流程
 
-按以下步骤顺序执行，每步的详细指令在对应的参考文件中。
+读取对应参考文件后按步骤顺序执行：
 
-### 阶段一：解析与提取（步骤 1-5）
-
-读取 `references/push-parse.md` 执行：
-
-1. **解析参数** — 从 `{{ARGUMENTS}}` 提取文件路径和可选行号
-2. **加载配置** — 读取 Token 和 ProjectId（环境变量 > `.claude/apifox.json`）
-3. **读取 Controller** — 验证文件并提取类级路径前缀和 Tag
-4. **定位方法** — 按模式（整个 Controller / 单个方法）找到目标方法
-5. **提取方法信息** — 接口名、HTTP 方法/路径、请求参数、响应类型
-
-### 阶段二：类型展开（步骤 6-7）
-
-6. **递归展开类型** — 读取 `references/type-resolution.md` 执行
-   - 类型映射使用 `data/type-mappings.json`
-   - 框架骨架使用 `data/framework-schemas.json`
-   - 两级降级定位：Glob → 降级为 `{type: object}`
-7. **枚举识别** — 读取 `references/enum-detection.md` 执行
-   - Integer 字段尝试匹配枚举，提取 code + desc
-
-### 阶段三：文件夹选择与生成（步骤 8-9）
-
-读取 `references/push-api.md` 的「步骤 8」执行：
-
-8. **获取文件夹结构并选择** — 调用 export-openapi 获取现有文件夹，让用户选择目标文件夹
-
-然后读取 `references/openapi-gen.md` 执行：
-
-9. **生成 OpenAPI Spec** — 将解析结果 + 用户选择的文件夹路径组装为 OpenAPI 3.0 JSON
-   - Schema 命名规则和清洗规则参考 `data/framework-schemas.json`
-
-### 阶段四：验证与推送（步骤 10-12）
-
-继续读取 `references/push-api.md` 执行步骤 10-12：
-
-10. **JSON 预验证** — 写入临时文件并用 python3 验证语法，最多重试 3 次
-11. **分类推送**（5 个子步骤）：
-    - 11.1 构建双向索引（path+method、源码锚点 `x-source-method-fq`）
-    - 11.2 按锚点分类：update / **rename（死接口）** / create / skip
-    - 11.3 对 rename 候选用 `AskUserQuestion` 让用户确认是否清理旧接口
-    - 11.4 调用 Apifox DELETE API 清理确认要删的旧接口
-    - 11.5 分别调用 import-openapi 推送更新批次和新建批次
-12. **报告结果** — 汇总更新/新建/清理/跳过数量并清理临时文件
+| 步骤 | 参考文件 | 内容 |
+|------|---------|------|
+| 1-5 | `references/push-parse.md` | 解析参数、加载配置、读取 Controller、定位方法、提取接口信息 |
+| 6 | `references/type-resolution.md` | 递归展开 DTO/VO 类型，两级降级定位 |
+| 7 | `references/enum-detection.md` | Integer 字段匹配枚举，提取 code+desc |
+| 8 | `references/push-api.md` 步骤 8 | export-openapi 获取文件夹，AskUserQuestion 选目标 |
+| 9 | `references/openapi-gen.md` | 组装 OpenAPI 3.0 JSON，写入 spec |
+| 10-12 | `references/push-api.md` 步骤 10-12 | JSON 预验证、分类推送（锚点匹配/死接口清理/import）、报告 |
 
 ---
 
 ## Pull 流程
 
-从 Apifox 项目中按目录拉取接口定义，以精简 OpenAPI JSON 格式保存到本地 `.claude/apis/` 目录。
+读取 `references/pull.md` 按步骤顺序执行：
 
-读取 `references/pull.md` 按以下步骤顺序执行：
-
-1. **加载配置** — 读取 Token 和 ProjectId（环境变量 > `.claude/apifox.json`）
-2. **获取目录结构** — 调用 export-openapi 导出全量，解析 `x-apifox-folder` 构建目录树
-3. **用户选择目录** — 通过 AskUserQuestion 展示目录列表，支持多选
-4. **按目录导出** — 从全量数据中按 `x-apifox-folder` 筛选接口，递归收集引用的 schemas
-5. **精简 OpenAPI** — 去掉冗余元数据和扩展属性，仅保留 paths + schemas
-6. **diff 预览与确认** — 对比每个目录的远程新数据与本地已有 JSON，输出新增 / 变更 / 删除摘要，用 AskUserQuestion 让用户确认覆盖（全部 / 逐目录 / 取消）
-7. **保存文件** — 只把用户确认的目录写入 `.claude/apis/{目录路径}.json`
-8. **输出结果摘要** — 报告拉取的目录数、接口数、保存路径，清理临时文件
+| 步骤 | 内容 |
+|------|------|
+| 1 | 加载配置（env > `.claude/apifox.json`） |
+| 2 | export-openapi 获取全量，`list_folders.py` 枚举目录 |
+| 3 | AskUserQuestion 多选目录 |
+| 4 | `pull_extract.py` 按接口粒度切片 + 精简扩展字段 |
+| 5 | 精简规则（内聚到脚本，仅保留 paths+schemas） |
+| 5.5 | `pull_diff.py` diff 预览，AskUserQuestion 确认覆盖 |
+| 6 | `pull_save.py` 落盘，自动迁移 v1.2 旧聚合文件 |
+| 7 | 输出摘要，清理临时文件 |
 
 ---
 
@@ -105,10 +71,10 @@ Apifox 接口同步工具，支持双向操作：
 
 ## 注意事项
 
-1. **只读操作原则**：skill 不修改项目源代码，仅读取 Controller 和 DTO 文件
-2. **allowed-tools**: Read, Glob, Grep, Bash, AskUserQuestion — 使用 Read/Glob/Grep 解析源码，Bash 执行 curl 和 python3，AskUserQuestion 交互
+1. **只读原则**：不修改项目源代码，仅读取 Controller 和 DTO 文件
+2. **allowed-tools**: Read, Glob, Grep, Bash, AskUserQuestion
 3. **跨模块查找**：Glob 从项目根目录搜索，覆盖所有子模块
-4. **不可解析类型**：降级为 `{type: object}`，不中断整体流程
-5. **敏感信息**：Token 存储在项目级 `.claude/apifox.json`，建议加入 `.gitignore`。也可通过环境变量 `APIFOX_API_TOKEN` 配置。**禁止将 Token 明文输出到终端**
-6. **项目根目录定位**：所有需要 PROJECT_ROOT 的步骤统一使用 `PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")`
-7. **幂等性与文件夹隔离**：同一文件夹内重复推送同一 Controller 不会产生重复接口（`AUTO_MERGE` 更新）；若推送到不同文件夹，则会在新文件夹中创建独立接口（`CREATE_NEW`），不影响其他文件夹中的同名接口。**已知限制**：当同一 path+method 已存在于多个文件夹时，后续更新可能不准确
+4. **不可解析类型**：降级为 `{type: object}`，不中断流程
+5. **敏感信息**：Token 存于 `.claude/apifox.json`，建议加 `.gitignore`；也可用 `APIFOX_API_TOKEN` 环境变量。**禁止明文输出 Token**
+6. **PROJECT_ROOT 定位**：统一使用 `PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")`
+7. **幂等性**：同文件夹重复推送同一 Controller 使用 `AUTO_MERGE`；推到不同文件夹则 `CREATE_NEW`。**已知限制**：同 path+method 跨文件夹已存在时后续更新可能不准确
