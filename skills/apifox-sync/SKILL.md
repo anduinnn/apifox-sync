@@ -49,7 +49,7 @@ Apifox 接口同步工具，支持双向操作：
 
 读取 `references/pull.md` 按步骤顺序执行：
 
-pull 参数解析（**在步骤 2 获取目录列表后判断**）：
+pull 参数解析（**步骤 2.5 由 `detect_mode.py` 脚本自动完成**）：
 
 1. 无参数 → 交互模式
 2. 参数与已有 folder 名精确匹配 → 目录模式，直接拉取该目录
@@ -60,7 +60,7 @@ pull 参数解析（**在步骤 2 获取目录列表后判断**）：
 |------|------|
 | 1 | 加载配置（env > `.claude/apifox.json`） |
 | 2 | export-openapi 获取全量，`list_folders.py` 枚举目录 |
-| 1.5 | 参数判断：按上述 1→2→3→4 顺序匹配，确定 `PULL_MODE` |
+| 2.5 | `detect_mode.py` 自动检测参数模式，确定 `PULL_MODE` |
 | 3 | **交互模式**：AskUserQuestion 多选目录；**其他模式**：跳过 |
 | 4 | `pull_extract.py` 按接口粒度切片 + 精简扩展字段 |
 | 5 | 精简规则（内聚到脚本，仅保留 paths+schemas） |
@@ -89,3 +89,4 @@ pull 参数解析（**在步骤 2 获取目录列表后判断**）：
 5. **敏感信息**：Token 存于 `.claude/apifox.json`，建议加 `.gitignore`；也可用 `APIFOX_API_TOKEN` 环境变量。**禁止明文输出 Token**
 6. **PROJECT_ROOT 定位**：统一使用 `PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")`
 7. **幂等性**：同文件夹重复推送同一 Controller 使用 `AUTO_MERGE`；推到不同文件夹则 `CREATE_NEW`。**已知限制**：同 path+method 跨文件夹已存在时后续更新可能不准确
+# test

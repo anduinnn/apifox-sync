@@ -14,15 +14,6 @@ eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 ```
 `TOKEN` 由对话层从 `.claude/apifox.json` 的 `apiToken`（或 `$APIFOX_API_TOKEN`）赋值；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。Token 或 ProjectId 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
 
-## 步骤 1.5：解析 pull 参数
-
-从 `{{ARGUMENTS}}` 中去掉 `pull` 后解析剩余参数。**参数匹配在步骤 2 获取目录列表后执行**：
-
-1. 无参数 → `PULL_MODE=interactive`
-2. 参数与某个 folder 精确匹配 → `PULL_MODE=folder`，`PULL_FOLDER=匹配的目录`
-3. 参数格式为 `<目录>/<接口名>` 且目录部分匹配 → `PULL_MODE=api`，`PULL_FOLDER=目录`，`PULL_API_NAME=接口名`
-4. **以上都不匹配** → 视为接口名关键词搜索：从 `${TMPPREFIX}export.json` 的所有 operation 中搜索 `summary` 包含该参数的接口，`PULL_MODE=api`，自动确定 folder 和接口列表。若无匹配 → 提示"未找到匹配的目录或接口"，列出可用目录，中止。
-
 ## 步骤 2：获取目录结构
 
 调用 export-openapi 获取全量数据 → 写入 `${TMPPREFIX}export.json`（`200` 写文件；`401/403` 读 `references/init.md` 重配后重试；其他中止）：
@@ -30,6 +21,38 @@ eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 python3 skills/apifox-sync/scripts/list_folders.py "${TMPPREFIX}export.json"
 ```
 stdout 每行一个 folder（按字典序；空行代表根目录）。空输出 → 提示"项目中尚无接口"，中止。
+
+## 步骤 2.5：解析 pull 参数
+
+从 `{{ARGUMENTS}}` 中去掉 `pull` 后，将剩余参数传入 `detect_mode.py`，由脚本自动完成匹配：
+
+```bash
+DETECT_RESULT=$(python3 skills/apifox-sync/scripts/detect_mode.py \
+  "${TMPPREFIX}export.json" "用户参数")
+```
+
+无参数时省略第二个 argv：
+```bash
+DETECT_RESULT=$(python3 skills/apifox-sync/scripts/detect_mode.py \
+  "${TMPPREFIX}export.json")
+```
+
+**退出码非 0 → 脚本已在 stderr 列出可用目录，中止流程。**
+
+脚本输出 JSON，按 `mode` 字段设置后续变量：
+
+| mode            | 含义                               | 后续动作                                                   |
+|-----------------|------------------------------------|------------------------------------------------------------|
+| `interactive`   | 无参数                             | `PULL_MODE=interactive`，用 `all_folders` 展示给用户       |
+| `folder`        | 精确目录匹配                       | `PULL_MODE=folder`，`PULL_FOLDER=folder` 字段值            |
+| `api`           | 接口匹配（目录/接口名 或关键词搜索） | `PULL_MODE=api`，从 `apis` 数组提取 folder 和接口列表      |
+
+匹配优先级（脚本内部实现，无需 Claude 手动判断）：
+1. 无参数 → interactive
+2. 参数与已有 folder 精确匹配 → folder
+3. 参数格式 `<目录>/<接口名>` 且目录匹配 → api
+4. 以上都不匹配 → 搜索所有 operation 的 summary（包含匹配）→ api
+5. 仍无匹配 → 非零退出码，中止
 
 ## 步骤 3：确定目标目录
 
@@ -80,7 +103,7 @@ python3 skills/apifox-sync/scripts/pull_diff.py "$PROJECT_ROOT"
 python3 skills/apifox-sync/scripts/pull_approve_all.py
 ```
 
-**接口模式**（`PULL_MODE=api`）：跳过询问，遍历步骤 4 生成的所有 `${TMPPREFIX}pull-op-*.json` 切片，读取每个切片内部 operation 的 `summary`，筛选出 summary 包含 `PULL_API_NAME` 关键词的接口（若由关键词搜索进入则使用步骤 1.5 已匹配的结果），自动写 API 模式 approved：
+**接口模式**（`PULL_MODE=api`）：跳过询问，遍历步骤 4 生成的所有 `${TMPPREFIX}pull-op-*.json` 切片，读取每个切片内部 operation 的 `summary`，筛选出 summary 包含 `PULL_API_NAME` 关键词的接口（若由关键词搜索进入则使用步骤 2.5 已匹配的结果），自动写 API 模式 approved：
 ```bash
 cat > "${TMPPREFIX}pull-approved.json" << 'APEOF'
 {"mode": "api", "items": [
