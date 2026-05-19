@@ -26,6 +26,7 @@ Apifox 接口同步工具，支持双向操作：
   > - `/apifox-sync pull` — 交互式选择目录拉取
   > - `/apifox-sync pull 用户管理` — 直接拉取指定目录
   > - `/apifox-sync pull 用户管理/创建用户` — 只拉取指定目录下的单个接口
+  > - `/apifox-sync pull 获取用户列表` — 按关键词搜索接口并拉取
 
 ---
 
@@ -48,20 +49,22 @@ Apifox 接口同步工具，支持双向操作：
 
 读取 `references/pull.md` 按步骤顺序执行：
 
-pull 支持三种调用方式：
+pull 参数解析（**在步骤 2 获取目录列表后判断**）：
 
-- `pull` — 无参数，交互式选择目录（步骤 3 AskUserQuestion）
-- `pull <目录名>` — 直接拉取指定目录，跳过步骤 3
-- `pull <目录名>/<接口名>` — 只拉取该目录下匹配 summary 的单个接口，跳过步骤 3 并在步骤 5.5 自动使用 API 模式
+1. 无参数 → 交互模式
+2. 参数与已有 folder 名精确匹配 → 目录模式，直接拉取该目录
+3. 参数格式 `<目录>/<接口名>` 且目录部分匹配 → 接口模式
+4. **以上都不匹配** → 视为关键词，搜索所有接口的 summary，拉取匹配的接口
 
 | 步骤 | 内容 |
 |------|------|
 | 1 | 加载配置（env > `.claude/apifox.json`） |
 | 2 | export-openapi 获取全量，`list_folders.py` 枚举目录 |
-| 3 | **无参数时**：AskUserQuestion 多选目录；**有参数时**：跳过，直接用参数指定的目录 |
+| 1.5 | 参数判断：按上述 1→2→3→4 顺序匹配，确定 `PULL_MODE` |
+| 3 | **交互模式**：AskUserQuestion 多选目录；**其他模式**：跳过 |
 | 4 | `pull_extract.py` 按接口粒度切片 + 精简扩展字段 |
 | 5 | 精简规则（内聚到脚本，仅保留 paths+schemas） |
-| 5.5 | `pull_diff.py` diff 预览；**指定接口时**：自动写 API 模式 approved，跳过确认；**指定目录时**：自动写 folder 模式 approved，跳过确认；**无参数时**：AskUserQuestion 确认 |
+| 5.5 | `pull_diff.py` diff 预览；**目录/接口/关键词模式**：自动 approve，跳过确认；**交互模式**：AskUserQuestion 确认 |
 | 6 | `pull_save.py` 落盘，自动迁移 v1.2 旧聚合文件 |
 | 7 | 输出摘要，清理临时文件 |
 

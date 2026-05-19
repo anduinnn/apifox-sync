@@ -16,13 +16,12 @@ eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 
 ## 步骤 1.5：解析 pull 参数
 
-从 `{{ARGUMENTS}}` 中去掉 `pull` 后解析剩余参数：
+从 `{{ARGUMENTS}}` 中去掉 `pull` 后解析剩余参数。**参数匹配在步骤 2 获取目录列表后执行**：
 
-- **无参数** → 交互模式（后续步骤 3 和 5.5 使用 AskUserQuestion）
-- **`<目录名>`**（如 `用户管理`）→ 直接模式，跳过步骤 3，步骤 5.5 自动 approve 整个目录
-- **`<目录名>/<接口名>`**（如 `用户管理/创建用户`）→ 接口模式，跳过步骤 3，步骤 5.5 自动写 API 模式 approved（按 summary 匹配）
-
-将解析结果保存为变量 `PULL_MODE`（`interactive` / `folder` / `api`）、`PULL_FOLDER`、`PULL_API_NAME`。
+1. 无参数 → `PULL_MODE=interactive`
+2. 参数与某个 folder 精确匹配 → `PULL_MODE=folder`，`PULL_FOLDER=匹配的目录`
+3. 参数格式为 `<目录>/<接口名>` 且目录部分匹配 → `PULL_MODE=api`，`PULL_FOLDER=目录`，`PULL_API_NAME=接口名`
+4. **以上都不匹配** → 视为接口名关键词搜索：从 `${TMPPREFIX}export.json` 的所有 operation 中搜索 `summary` 包含该参数的接口，`PULL_MODE=api`，自动确定 folder 和接口列表。若无匹配 → 提示"未找到匹配的目录或接口"，列出可用目录，中止。
 
 ## 步骤 2：获取目录结构
 
@@ -41,13 +40,17 @@ cat > "${TMPPREFIX}folders.json" << 'FEOF'
 FEOF
 ```
 
-**直接模式 / 接口模式**（`PULL_MODE=folder` 或 `api`）：验证 `PULL_FOLDER` 在步骤 2 输出的目录列表中存在，然后直接写入：
+**直接模式**（`PULL_MODE=folder`）：验证 `PULL_FOLDER` 在步骤 2 的目录列表中存在，直接写入。不存在时列出可用目录，中止。
+
+**接口模式**（`PULL_MODE=api`）：
+- 若 `PULL_FOLDER` 已确定（`目录/接口名` 格式）→ 写入该目录
+- 若由关键词搜索确定 → 从匹配结果中提取所有涉及的 folder，写入这些 folder
+
 ```bash
 cat > "${TMPPREFIX}folders.json" << 'FEOF'
 ["用户管理"]
 FEOF
 ```
-不存在时提示"目录 '{PULL_FOLDER}' 在 Apifox 项目中未找到"，列出可用目录供参考，中止。
 
 ## 步骤 4：按接口切片 + 精简
 
@@ -77,13 +80,16 @@ python3 skills/apifox-sync/scripts/pull_diff.py "$PROJECT_ROOT"
 python3 skills/apifox-sync/scripts/pull_approve_all.py
 ```
 
-**接口模式**（`PULL_MODE=api`）：跳过询问，从 `${TMPPREFIX}pull-diff.json` 中找到 `PULL_FOLDER` 下 summary 匹配 `PULL_API_NAME` 的接口，自动写 API 模式 approved：
+**接口模式**（`PULL_MODE=api`）：跳过询问，遍历步骤 4 生成的所有 `${TMPPREFIX}pull-op-*.json` 切片，读取每个切片内部 operation 的 `summary`，筛选出 summary 包含 `PULL_API_NAME` 关键词的接口（若由关键词搜索进入则使用步骤 1.5 已匹配的结果），自动写 API 模式 approved：
 ```bash
 cat > "${TMPPREFIX}pull-approved.json" << 'APEOF'
-{"mode": "api", "items": [{"folder": "用户管理", "method": "GET", "path": "/api/users"}]}
+{"mode": "api", "items": [
+  {"folder": "用户管理", "method": "GET", "path": "/api/users"},
+  {"folder": "用户管理", "method": "POST", "path": "/api/users"}
+]}
 APEOF
 ```
-若未找到匹配的接口，列出该目录下所有接口供参考，中止。
+若无匹配接口，列出所有可用接口供参考，中止。
 
 **交互模式**（`PULL_MODE=interactive`）：`AskUserQuestion` 询问：
 - **全部覆盖**（推荐）→ `python3 skills/apifox-sync/scripts/pull_approve_all.py`
