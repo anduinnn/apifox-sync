@@ -55,11 +55,30 @@ python3 skills/apifox-sync/scripts/pull_diff.py "$PROJECT_ROOT"
 本地 ↔ 远端按 `(METHOD, path)` 对齐（不依赖文件名）；v1.2 旧聚合文件自动展开。stdout 打印 `[NEW]/[SAME]/[DIFF]` 摘要 + 每 folder 目标结构预览。写 `${TMPPREFIX}pull-diff.json`（含 `new/updated/unchanged/removed/target_layout/legacy_file`）。
 
 `AskUserQuestion` 询问：
-- **全部覆盖** → `python3 skills/apifox-sync/scripts/pull_approve_all.py`
-- **逐目录选择**（multiSelect）→ Claude 按勾选写 `${TMPPREFIX}pull-approved.json`
+- **全部覆盖**（推荐）→ `python3 skills/apifox-sync/scripts/pull_approve_all.py`
+- **逐接口选择** → 按下方「逐接口选择流程」处理
 - **取消** → 删除临时文件，中止
 
 特殊：全部 `nochange` 且无旧文件 → 跳过询问提示"远程无变化"；全部首次新增 → 建议默认全部保存。
+
+### 逐接口选择流程
+
+读取 `${TMPPREFIX}pull-diff.json`，对每个 `status` 为 `"new-file"` 或 `"diff"` 的 folder：
+1. 从该 folder 的 `new` + `updated` 列表提取可选接口（格式：`METHOD path → filename`）
+2. 用 `AskUserQuestion`（`multiSelect: true`）展示，header 为 folder 名
+3. 用户勾选要更新的接口
+
+将所有选中的接口写入 `${TMPPREFIX}pull-approved.json`，**使用 API 模式格式**：
+```bash
+cat > "${TMPPREFIX}pull-approved.json" << 'APEOF'
+{"mode": "api", "items": [
+  {"folder": "用户管理", "method": "GET", "path": "/api/users"},
+  {"folder": "用户管理", "method": "POST", "path": "/api/users"}
+]}
+APEOF
+```
+
+`pull_save.py` 在 API 模式下只写入选中的接口，**不会删除**本地未选中但已存在的接口。
 
 ## 步骤 6：保存文件
 

@@ -13,7 +13,9 @@ env:
     TMPPREFIX  临时文件前缀（必填）
 
 输入：
-    ${TMPPREFIX}pull-approved.json  字符串数组（actual_folder 清单）
+    ${TMPPREFIX}pull-approved.json  两种格式：
+        - 字符串数组（folder 模式）：["folder1", "folder2"]
+        - 对象（API 模式）：{"mode": "api", "items": [{"folder": "...", "method": "GET", "path": "/..."}]}
     ${TMPPREFIX}pull-op-*.json      各接口切片
 
 命名规则（v1.4）：
@@ -27,14 +29,15 @@ env:
     读取本地 .json 的内部 `paths` 第一个 entry，按 (METHOD, path) 与远程匹配。
     这样无论旧布局（v1.2 folder 聚合 / v1.3 path 展开成目录）还是新布局，都能识别。
 
-行为（对每个 approved folder）：
-    1) 旧 folder 聚合文件 .claude/apis/<folder>.json 存在 → 拆分其内部接口落到新布局；
-       然后删除旧聚合文件
-    2) 远程接口：按上述命名规则写入 .claude/apis/<folder>/<filename>.json；
-       若本地存在同 (METHOD, path) 但文件名不同的 op 文件 → 删除旧文件再写入新文件
-    3) 本地 folder 目录下 (METHOD, path) 在远程不存在的 op 文件 → 删除
-    4) 递归清理 folder 目录下的空子目录
-    5) 非 approved folder 的临时 op 切片 → 直接删除
+行为：
+    folder 模式（对每个 approved folder）：
+      1) 旧聚合 .claude/apis/<folder>.json → 拆分迁移后删除
+      2) 远程接口写入；本地同 key 旧文件名 → 先删再写
+      3) 本地有但远程无的 → 删除
+      4) 递归清理空子目录
+      5) 非 approved folder 的临时切片 → 直接删除
+    API 模式（逐接口选择）：
+      只写入 items 中匹配的接口；不删除未选中的本地接口
 
 退出码：0 成功 / 1 运行时错误 / 2 参数用法错误
 """
@@ -189,10 +192,21 @@ def cleanup_empty_dirs(leaf_dir: str, stop_at: str) -> None:
 
 def run(project_root: str, tmpprefix: str) -> int:
     approved_path = f"{tmpprefix}pull-approved.json"
+    api_mode = False
+    approved_apis: set[tuple[str, str, str]] = set()
+    approved: set[str] = set()
     try:
-        approved = set(json.loads(Path(approved_path).read_text(encoding="utf-8")))
+        raw = json.loads(Path(approved_path).read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and raw.get("mode") == "api":
+            api_mode = True
+            for item in raw.get("items", []):
+                f, m, p = item.get("folder", ""), item.get("method", "").upper(), item.get("path", "")
+                approved_apis.add((f, m, p))
+                approved.add(f)
+        elif isinstance(raw, list):
+            approved = set(raw)
     except Exception:
-        approved = set()
+        pass
 
     # 1) 收集远端 op 切片
     folder_ops: dict[str, list[dict]] = {}
@@ -244,12 +258,17 @@ def run(project_root: str, tmpprefix: str) -> int:
         # 5) 写远端接口；若本地已有同 (METHOD, path) 的文件但路径不同 → 先删
         for entry in ops:
             key = (entry["method"], entry["path"])
+            if api_mode and (folder, key[0], key[1]) not in approved_apis:
+                try:
+                    os.remove(entry["tmp"])
+                except OSError:
+                    pass
+                continue
             filename = filename_map[key]
             target = os.path.join(target_dir, filename)
 
             local_existing = local_by_key.get(key)
             if local_existing and os.path.abspath(local_existing) != os.path.abspath(target):
-                # 旧布局/旧文件名 → 删除旧文件
                 try:
                     os.remove(local_existing)
                     cleanup_empty_dirs(os.path.dirname(local_existing), target_dir)
@@ -264,18 +283,19 @@ def run(project_root: str, tmpprefix: str) -> int:
             shutil.move(entry["tmp"], target)
             saved.append((folder, os.path.relpath(target, project_root)))
 
-        # 6) 清理远端已不存在的本地接口
-        for (m, p), abs_path in local_by_key.items():
-            if (m, p) in remote_keys:
-                continue
-            if not os.path.exists(abs_path):
-                continue  # 已在上一步删
-            try:
-                os.remove(abs_path)
-                removed_stale.append((folder, os.path.relpath(abs_path, project_root)))
-                cleanup_empty_dirs(os.path.dirname(abs_path), target_dir)
-            except OSError as e:
-                print(f"WARN: 无法删除过期文件 {abs_path}: {e}", file=sys.stderr)
+        # 6) 清理远端已不存在的本地接口（API 模式下跳过，不删除未选中的接口）
+        if not api_mode:
+            for (m, p), abs_path in local_by_key.items():
+                if (m, p) in remote_keys:
+                    continue
+                if not os.path.exists(abs_path):
+                    continue
+                try:
+                    os.remove(abs_path)
+                    removed_stale.append((folder, os.path.relpath(abs_path, project_root)))
+                    cleanup_empty_dirs(os.path.dirname(abs_path), target_dir)
+                except OSError as e:
+                    print(f"WARN: 无法删除过期文件 {abs_path}: {e}", file=sys.stderr)
 
     for folder, rel in saved:
         print(f'SAVED   : "{folder}" → {rel}')
@@ -425,6 +445,54 @@ def self_test() -> int:
         assert not Path(p_unchecked).exists()
         # 临时 op 文件全部被消费
         assert not glob.glob(f"{prefix}pull-op-*.json")
+
+        # ===== 场景 H: API 模式 — 只保存选中的接口，不删除未选中的 =====
+        tmp2 = Path(tempfile.mkdtemp(prefix="apifox-sync-selftest-api-"))
+        try:
+            prefix2 = str(tmp2) + "/apifox-sync-"
+            pr2 = tmp2 / "proj2"
+            apis2 = pr2 / ".claude" / "apis"
+            (apis2 / "混合").mkdir(parents=True)
+
+            def write_tmp2(folder: str, method: str, path: str, summary: str) -> str:
+                op = {"summary": summary, "x-apifox-folder": folder}
+                data = {"paths": {path: {method.lower(): op}}, "components": {"schemas": {}}}
+                key = api_path.hash_key(folder, method, path)
+                p = f"{prefix2}pull-op-{key}.json"
+                Path(p).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                return p
+
+            # 远端有 3 个接口
+            write_tmp2("混合", "GET", "/api/a", "接口A")
+            write_tmp2("混合", "POST", "/api/b", "接口B")
+            write_tmp2("混合", "PUT", "/api/c", "接口C")
+
+            # 本地已有接口D（不在远端，folder 模式会删除，API 模式应保留）
+            (apis2 / "混合" / "接口D.json").write_text(
+                json.dumps({"paths": {"/api/d": {"delete": {"summary": "接口D", "x-apifox-folder": "混合"}}}, "components": {"schemas": {}}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            # API 模式：只选择接口A
+            Path(f"{prefix2}pull-approved.json").write_text(
+                json.dumps({"mode": "api", "items": [{"folder": "混合", "method": "GET", "path": "/api/a"}]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.environ["TMPPREFIX"] = prefix2
+            rc2 = run(str(pr2), prefix2)
+            assert rc2 == 0
+
+            # 接口A 被保存
+            assert (apis2 / "混合" / "接口A.json").is_file()
+            # 接口B/C 的临时文件被清理（未选中）
+            assert not glob.glob(f"{prefix2}pull-op-*.json")
+            # 接口B/C 没有被写入
+            assert not (apis2 / "混合" / "接口B.json").exists()
+            assert not (apis2 / "混合" / "接口C.json").exists()
+            # 关键：接口D（本地已有但未选中）不应被删除
+            assert (apis2 / "混合" / "接口D.json").is_file()
+        finally:
+            shutil.rmtree(tmp2, ignore_errors=True)
 
         print("SELFTEST_OK")
         return 0
