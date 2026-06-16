@@ -7,6 +7,23 @@ mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
 export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
 ```
 
+**Debug 模式**：push 流程的 `APIFOX_DEBUG`/`APIFOX_DEBUG_LOG`/`APIFOX_SESSION_ID` 由 `push-parse.md` 步骤 2 的 eval 设置。当 `APIFOX_DEBUG=1` 时，curl 调用前后通过 `debug_log.py --format-entry` 记录日志：
+```bash
+if [ "$APIFOX_DEBUG" = "1" ]; then
+  _start=$(python3 -c "import time; print(int(time.time()*1000))")
+fi
+# ... curl 调用 ...
+if [ "$APIFOX_DEBUG" = "1" ]; then
+  _end=$(python3 -c "import time; print(int(time.time()*1000))")
+  _dur=$((_end - _start))
+  python3 skills/apifox-sync/scripts/debug_log.py --format-entry \
+    --session-id "$APIFOX_SESSION_ID" --step "push.<step_name>" \
+    --status "success" --duration-ms "$_dur" --http-status "$_http_code" \
+    --command "curl *** <url>" >> "$APIFOX_DEBUG_LOG"
+fi
+```
+对步骤 11.4（DELETE 死接口）和步骤 11.5（import-openapi）的 curl 调用均适用此模式。
+
 ## 步骤 8：获取文件夹并选择
 
 **必须在步骤 9 之前执行**，spec 的 `x-apifox-folder` 需用户选择的路径。

@@ -47,12 +47,14 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import api_path  # noqa: E402
 from api_path import folder_dir, old_aggregate_path  # noqa: E402
+from debug_log import debug_log  # noqa: E402
 
 
 # -------- 远端切片读取 --------
@@ -122,22 +124,8 @@ def scan_local_ops(project_root: str, folder: str) -> dict[tuple[str, str], dict
 # -------- 命名规划 --------
 
 def plan_filenames(remote_entries: list[dict]) -> dict[tuple[str, str], str]:
-    """对同 folder 下的远端接口按 summary 命名；冲突时加 METHOD。与 pull_save 逻辑一致。"""
-    base: dict[tuple[str, str], str] = {}
-    counts: dict[str, int] = {}
-    for e in remote_entries:
-        name = api_path.op_filename(e["summary"], e["method"], e["path"], with_method=False)
-        base[(e["method"], e["path"])] = name
-        counts[name] = counts.get(name, 0) + 1
-    result: dict[tuple[str, str], str] = {}
-    for e in remote_entries:
-        key = (e["method"], e["path"])
-        bn = base[key]
-        if counts.get(bn, 0) > 1:
-            result[key] = api_path.op_filename(e["summary"], e["method"], e["path"], with_method=True)
-        else:
-            result[key] = bn
-    return result
+    """对同 folder 下的远端接口按 summary 命名；冲突时加 METHOD。委托 api_path 共用实现。"""
+    return api_path.plan_filenames(remote_entries)
 
 
 # -------- 核心 diff --------
@@ -395,7 +383,15 @@ def main(argv: list[str]) -> int:
     if not tmpprefix:
         print("ERROR: env TMPPREFIX is required", file=sys.stderr)
         return 1
-    return run(argv[1], tmpprefix)
+    _t0 = time.time()
+    rc = run(argv[1], tmpprefix)
+    if rc == 0:
+        debug_log("pull.pull_diff", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"project_root={argv[1]}")
+    else:
+        debug_log("pull.pull_diff", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"project_root={argv[1]}", error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":

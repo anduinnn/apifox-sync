@@ -12,6 +12,14 @@ export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
 ```bash
 eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 ```
+
+**Debug 模式传递**：`load_config.py` 会输出 `APIFOX_DEBUG=0|1`。当 `APIFOX_DEBUG=1` 时，还会输出 `APIFOX_DEBUG_LOG` 和 `APIFOX_SESSION_ID`。eval 后这些变量即可用。在首次 eval 后设置 trap 以确保流程结束时（无论成功或失败）输出执行摘要：
+```bash
+if [ "$APIFOX_DEBUG" = "1" ]; then
+  export APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
+  trap 'python3 skills/apifox-sync/scripts/debug_log.py --summary "$APIFOX_DEBUG_LOG"' EXIT
+fi
+```
 `TOKEN` 由对话层从 `.claude/apifox.json` 的 `apiToken`（或 `$APIFOX_API_TOKEN`）赋值；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。Token 或 ProjectId 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
 
 ## 步骤 2：获取目录结构

@@ -21,7 +21,11 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from debug_log import debug_log  # noqa: E402
 
 
 def verify(path: str) -> int:
@@ -66,7 +70,15 @@ def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("Usage: verify_json.py <path> | -h | --self-test", file=sys.stderr)
         return 2
-    return verify(argv[1])
+    _t0 = time.time()
+    rc = verify(argv[1])
+    if rc == 0:
+        debug_log("push.verify_json", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"path={argv[1]}", output_summary="JSON_VALID")
+    else:
+        debug_log("push.verify_json", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"path={argv[1]}", output_summary="JSON_INVALID")
+    return rc
 
 
 if __name__ == "__main__":

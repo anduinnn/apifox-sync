@@ -43,7 +43,11 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from debug_log import debug_log  # noqa: E402
 
 
 def classify(spec: dict, existing: dict, by_source: dict) -> tuple[dict, dict, list, list]:
@@ -132,8 +136,12 @@ def build_payload(spec_obj: dict, behavior: str, update_folder: bool) -> dict:
 
 def run(spec_json_path: str, tmpprefix: str) -> int:
     spec = json.loads(Path(spec_json_path).read_text(encoding="utf-8"))
-    existing = json.loads(Path(f"{tmpprefix}existing.json").read_text(encoding="utf-8"))
-    by_source = json.loads(Path(f"{tmpprefix}by-source.json").read_text(encoding="utf-8"))
+    try:
+        existing = json.loads(Path(f"{tmpprefix}existing.json").read_text(encoding="utf-8"))
+        by_source = json.loads(Path(f"{tmpprefix}by-source.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        print(f"ERROR: 缺少前置文件 {e.filename}，请先执行 push_index.py", file=sys.stderr)
+        return 1
 
     update_paths, create_paths, rename_list, skipped = classify(spec, existing, by_source)
 
@@ -291,7 +299,15 @@ def main(argv: list[str]) -> int:
     if not tmpprefix:
         print("ERROR: env TMPPREFIX is required", file=sys.stderr)
         return 1
-    return run(argv[1], tmpprefix)
+    _t0 = time.time()
+    rc = run(argv[1], tmpprefix)
+    if rc == 0:
+        debug_log("push.push_classify", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"spec={argv[1]}")
+    else:
+        debug_log("push.push_classify", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"spec={argv[1]}", error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":

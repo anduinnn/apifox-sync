@@ -32,10 +32,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from json_safe import load_json_loose  # noqa: E402
+from debug_log import debug_log  # noqa: E402
 
 
 def extract_folders(data: dict) -> list[str]:
@@ -93,6 +95,9 @@ def detect(data: dict, argument: str | None) -> tuple[dict, int]:
             if matched:
                 return {"mode": "api", "apis": matched}, 0
 
+    if "/" in argument:
+        parts = argument.split("/", 1)
+        print(f'WARN: 目录 "{parts[0]}" 下未找到接口 "{parts[1]}"，降级为全局关键词搜索', file=sys.stderr)
     ops = extract_operations(data)
     matched = [op for op in ops if argument in op["summary"]]
     if matched:
@@ -225,7 +230,19 @@ def main(argv: list[str]) -> int:
         return 2
     export_path = argv[1]
     argument = argv[2] if len(argv) == 3 else None
-    return run(export_path, argument)
+    _t0 = time.time()
+    data = load_json_loose(export_path)
+    result, code = detect(data, argument)
+    if code == 0:
+        print(json.dumps(result, ensure_ascii=False))
+        debug_log("pull.detect_mode", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"argument={argument}",
+                  output_summary=f"mode={result.get('mode', '?')}")
+    else:
+        debug_log("pull.detect_mode", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"argument={argument}",
+                  error_detail="no match")
+    return code
 
 
 if __name__ == "__main__":

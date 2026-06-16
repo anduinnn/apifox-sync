@@ -26,10 +26,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from json_safe import load_json_loose  # noqa: E402
+from debug_log import debug_log  # noqa: E402
 
 
 def extract_folders(data: dict) -> list[str]:
@@ -115,7 +117,15 @@ def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("Usage: list_folders.py <export_json> | -h | --self-test", file=sys.stderr)
         return 2
-    return run(argv[1])
+    _t0 = time.time()
+    rc = run(argv[1])
+    if rc == 0:
+        debug_log("pull.list_folders", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"export={argv[1]}")
+    else:
+        debug_log("pull.list_folders", "error", int((time.time() - _t0) * 1000),
+                  error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":

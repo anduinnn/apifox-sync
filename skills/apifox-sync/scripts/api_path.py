@@ -158,6 +158,39 @@ def old_aggregate_path(project_root: str, folder: str) -> str:
     return os.path.join(apis_dir, folder + ".json")
 
 
+def plan_filenames(entries: list[dict]) -> dict[tuple[str, str], str]:
+    """对同一 folder 下的接口分配 filename；(METHOD, path) → filename。
+
+    entries 中每个 dict 需含 summary, method, path 字段。
+    策略：不带 METHOD 先算 candidate → 冲突加 METHOD → 二次冲突加 hash 兜底。
+    """
+    base_candidates: dict[tuple[str, str], str] = {}
+    counts: dict[str, int] = {}
+    for e in entries:
+        name = op_filename(e["summary"], e["method"], e["path"], with_method=False)
+        base_candidates[(e["method"], e["path"])] = name
+        counts[name] = counts.get(name, 0) + 1
+
+    result: dict[tuple[str, str], str] = {}
+    for e in entries:
+        key = (e["method"], e["path"])
+        base = base_candidates[key]
+        if counts.get(base, 0) > 1:
+            result[key] = op_filename(e["summary"], e["method"], e["path"], with_method=True)
+        else:
+            result[key] = base
+
+    seen: dict[str, tuple[str, str]] = {}
+    for key, name in list(result.items()):
+        if name in seen and seen[name] != key:
+            h = hash_key("", key[0], key[1])[:8]
+            stem = name[: -len(".json")]
+            result[key] = f"{stem}.{h}.json"
+        else:
+            seen[name] = key
+    return result
+
+
 def self_test() -> int:
     # sanitize
     assert sanitize_filename("hello") == "hello"
@@ -257,6 +290,24 @@ def self_test() -> int:
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # plan_filenames: 无冲突
+    entries1 = [
+        {"summary": "创建用户", "method": "POST", "path": "/api/users"},
+        {"summary": "删除用户", "method": "DELETE", "path": "/api/users/{id}"},
+    ]
+    names1 = plan_filenames(entries1)
+    assert names1[("POST", "/api/users")] == "创建用户.json", names1
+    assert names1[("DELETE", "/api/users/{id}")] == "删除用户.json", names1
+
+    # plan_filenames: summary 冲突 → 加 METHOD
+    entries2 = [
+        {"summary": "用户", "method": "GET", "path": "/api/users"},
+        {"summary": "用户", "method": "POST", "path": "/api/users"},
+    ]
+    names2 = plan_filenames(entries2)
+    assert names2[("GET", "/api/users")] == "用户.GET.json", names2
+    assert names2[("POST", "/api/users")] == "用户.POST.json", names2
 
     print("SELFTEST_OK")
     return 0

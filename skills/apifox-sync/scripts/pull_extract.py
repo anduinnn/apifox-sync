@@ -36,11 +36,13 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import api_path  # noqa: E402
 from json_safe import load_json_loose  # noqa: E402
+from debug_log import debug_log  # noqa: E402
 
 KEEP_EXTENSIONS = {"x-apifox-folder", "x-apifox-status", "x-apifox-enum"}
 
@@ -128,7 +130,8 @@ def run(folders: list[str], export_path: str, tmpprefix: str) -> int:
             filtered_schemas = {n: all_schemas[n] for n in needed if n in all_schemas}
 
             # 2) 构造单接口切片
-            op_copy = detail  # 原数据本轮只读，clean 会修改，用原地引用即可
+            import copy
+            op_copy = copy.deepcopy(detail)
             slice_paths = {path: {method: op_copy}}
             clean_extensions(slice_paths)
             clean_extensions(filtered_schemas)
@@ -289,7 +292,15 @@ def main(argv: list[str]) -> int:
     if not isinstance(folders, list):
         print("ERROR: folders-file must be a JSON array", file=sys.stderr)
         return 1
-    return run([str(f) for f in folders], export_path, tmpprefix)
+    _t0 = time.time()
+    rc = run([str(f) for f in folders], export_path, tmpprefix)
+    if rc == 0:
+        debug_log("pull.pull_extract", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"folders={len(folders)}")
+    else:
+        debug_log("pull.pull_extract", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"folders={len(folders)}", error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":

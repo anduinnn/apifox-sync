@@ -12,9 +12,19 @@
 
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
+export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
 eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
 ```
 `TOKEN` 由对话层从 `.claude/apifox.json` 的 `apiToken`（或 `$APIFOX_API_TOKEN`）赋值；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。Token 或 ProjectId 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
+
+**Debug 模式传递**：eval 后 `APIFOX_DEBUG` 变量即可用。当 `APIFOX_DEBUG=1` 时，设置 trap 输出执行摘要：
+```bash
+if [ "$APIFOX_DEBUG" = "1" ]; then
+  export APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
+  trap 'python3 skills/apifox-sync/scripts/debug_log.py --summary "$APIFOX_DEBUG_LOG"' EXIT
+fi
+```
 
 ## 步骤 3：读取 Controller 文件
 

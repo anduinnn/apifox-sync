@@ -49,12 +49,14 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import api_path  # noqa: E402
 from api_path import folder_dir, old_aggregate_path  # noqa: E402
+from debug_log import debug_log  # noqa: E402
 
 
 # -------- 临时切片读取 --------
@@ -84,42 +86,8 @@ def read_tmp_op(tmp_path: str) -> Optional[dict]:
 # -------- 文件名分配（summary 冲突处理） --------
 
 def assign_filenames(entries: list[dict]) -> dict[tuple[str, str], str]:
-    """对同一 folder 下的接口分配 filename；(METHOD, path) → filename。
-
-    策略：
-    1) 先按"不带 METHOD"算每条的 candidate filename
-    2) 统计 candidate 出现次数；>=2 的所有参与者统一改用"带 METHOD"
-    3) 若加 METHOD 后仍冲突（极端：summary 相同 + method 相同 + path 不同？
-       这不可能因为 (METHOD,path) 唯一），仍保留带 METHOD 版本；兜底加 hash
-    """
-    base_candidates: dict[tuple[str, str], str] = {}
-    counts: dict[str, int] = {}
-    for e in entries:
-        name = api_path.op_filename(e["summary"], e["method"], e["path"], with_method=False)
-        base_candidates[(e["method"], e["path"])] = name
-        counts[name] = counts.get(name, 0) + 1
-
-    result: dict[tuple[str, str], str] = {}
-    for e in entries:
-        key = (e["method"], e["path"])
-        base = base_candidates[key]
-        if counts.get(base, 0) > 1:
-            # 冲突 → 加 METHOD 后缀
-            result[key] = api_path.op_filename(e["summary"], e["method"], e["path"], with_method=True)
-        else:
-            result[key] = base
-
-    # 二次冲突兜底（理论上不会触发）：同 folder 两条 (METHOD, path) 不同但 summary+METHOD 相同
-    seen: dict[str, tuple[str, str]] = {}
-    for key, name in list(result.items()):
-        if name in seen and seen[name] != key:
-            # 用 hash 区分
-            h = api_path.hash_key("", key[0], key[1])[:8]
-            stem = name[: -len(".json")]
-            result[key] = f"{stem}.{h}.json"
-        else:
-            seen[name] = key
-    return result
+    """对同一 folder 下的接口分配 filename；(METHOD, path) → filename。委托 api_path 共用实现。"""
+    return api_path.plan_filenames(entries)
 
 
 # -------- 旧布局定位 --------
@@ -205,8 +173,9 @@ def run(project_root: str, tmpprefix: str) -> int:
                 approved.add(f)
         elif isinstance(raw, list):
             approved = set(raw)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"ERROR: 无法读取 approved 文件 {approved_path}: {e}", file=sys.stderr)
+        return 1
 
     # 1) 收集远端 op 切片
     folder_ops: dict[str, list[dict]] = {}
@@ -513,7 +482,15 @@ def main(argv: list[str]) -> int:
     if not tmpprefix:
         print("ERROR: env TMPPREFIX is required", file=sys.stderr)
         return 1
-    return run(argv[1], tmpprefix)
+    _t0 = time.time()
+    rc = run(argv[1], tmpprefix)
+    if rc == 0:
+        debug_log("pull.pull_save", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"project_root={argv[1]}")
+    else:
+        debug_log("pull.pull_save", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"project_root={argv[1]}", error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":

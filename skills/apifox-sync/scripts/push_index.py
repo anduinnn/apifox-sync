@@ -34,10 +34,12 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from json_safe import load_json_loose  # noqa: E402
+from debug_log import debug_log  # noqa: E402
 
 
 def extract_apifox_id(detail: dict) -> str | None:
@@ -159,7 +161,15 @@ def main(argv: list[str]) -> int:
     if not tmpprefix:
         print("ERROR: env TMPPREFIX is required", file=sys.stderr)
         return 1
-    return run(argv[1], tmpprefix)
+    _t0 = time.time()
+    rc = run(argv[1], tmpprefix)
+    if rc == 0:
+        debug_log("push.push_index", "success", int((time.time() - _t0) * 1000),
+                  input_summary=f"export={argv[1]}")
+    else:
+        debug_log("push.push_index", "error", int((time.time() - _t0) * 1000),
+                  input_summary=f"export={argv[1]}", error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":

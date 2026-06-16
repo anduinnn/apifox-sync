@@ -43,7 +43,11 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from debug_log import debug_log  # noqa: E402
 
 
 def run(tmpprefix: str) -> int:
@@ -132,7 +136,14 @@ def main(argv: list[str]) -> int:
     if not tmpprefix:
         print("ERROR: env TMPPREFIX is required", file=sys.stderr)
         return 1
-    return run(tmpprefix)
+    _t0 = time.time()
+    rc = run(tmpprefix)
+    if rc == 0:
+        debug_log("push.push_delete_list", "success", int((time.time() - _t0) * 1000))
+    else:
+        debug_log("push.push_delete_list", "error", int((time.time() - _t0) * 1000),
+                  error_detail=f"exit={rc}")
+    return rc
 
 
 if __name__ == "__main__":
