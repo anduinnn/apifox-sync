@@ -10,16 +10,15 @@ argv:
     <project_root>  项目根目录绝对路径（用于定位 .claude/apifox.json）
 
 env（优先级高于配置文件）:
-    APIFOX_API_TOKEN  Apifox Bearer Token（仅读，脚本不会回显）
+    APIFOX_API_TOKEN  Apifox Bearer Token
     APIFOX_PROJECT_ID Apifox 项目 ID
 
-stdout 输出协议（严格两行）:
+stdout 输出协议（eval 使用）:
+    TOKEN=<api_token>
     HAS_TOKEN=yes|no
     PID=<project_id>
-
-安全约束：
-- 严禁 print Token 或 Token 片段；脚本末尾自检 stdout 中不包含 `afxp_`。
-- Token 仅用于 HAS_TOKEN 标志位计算，不写入任何输出。
+    APIFOX_DEBUG=0|1
+    （debug=1 时额外输出 APIFOX_DEBUG_LOG 和 APIFOX_SESSION_ID）
 
 退出码：
     0 成功
@@ -36,7 +35,7 @@ from pathlib import Path
 
 
 def load_config(project_root: str) -> tuple[str, str, bool]:
-    """返回 (token, project_id, debug)。env 优先，回落配置文件。Token 不外流。"""
+    """返回 (token, project_id, debug)。env 优先，回落配置文件。"""
     cfg: dict = {}
     cfg_path = Path(project_root) / ".claude" / "apifox.json"
     if cfg_path.is_file():
@@ -53,9 +52,9 @@ def load_config(project_root: str) -> tuple[str, str, bool]:
 
 
 def emit(token: str, pid: str, debug: bool = False, project_root: str = "") -> str:
-    """生成 stdout 内容，不含 Token 本身。"""
+    """生成 stdout 内容，eval 后 TOKEN/PID/HAS_TOKEN 等变量直接可用。"""
     has = "yes" if token else "no"
-    lines = [f"HAS_TOKEN={has}", f"PID={pid}"]
+    lines = [f"TOKEN={token}", f"HAS_TOKEN={has}", f"PID={pid}"]
     if debug:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from debug_log import generate_session_id
@@ -70,13 +69,6 @@ def emit(token: str, pid: str, debug: bool = False, project_root: str = "") -> s
     else:
         lines.append("APIFOX_DEBUG=0")
     return "\n".join(lines) + "\n"
-
-
-def _assert_no_token_leak(output: str) -> None:
-    """自检：stdout 中不能出现 Apifox Token 前缀。"""
-    if "afxp_" in output:
-        print("SELFTEST_FAIL: Token prefix leaked in stdout", file=sys.stderr)
-        sys.exit(1)
 
 
 def self_test() -> int:
@@ -98,9 +90,9 @@ def self_test() -> int:
         try:
             t, p, d = load_config(str(root1))
             out = emit(t, p)
+            assert "TOKEN=afxp_fake_for_test_only" in out, f"case1 TOKEN missing: {out!r}"
             assert "HAS_TOKEN=yes" in out and "PID=12345" in out, f"case1 stdout unexpected: {out!r}"
             assert d is False, "case1 debug should be False"
-            _assert_no_token_leak(out)
 
             # fixture 2: 无配置文件 + env 覆盖
             root2 = tmp / "case2"
@@ -109,16 +101,16 @@ def self_test() -> int:
             os.environ["APIFOX_PROJECT_ID"] = "99999"
             t, p, d = load_config(str(root2))
             out = emit(t, p)
+            assert "TOKEN=afxp_env_fake" in out, f"case2 TOKEN missing: {out!r}"
             assert "HAS_TOKEN=yes" in out and "PID=99999" in out, f"case2 stdout unexpected: {out!r}"
-            _assert_no_token_leak(out)
 
-            # fixture 3: 无配置文件 + 无 env → HAS_TOKEN=no，PID 空
+            # fixture 3: 无配置文件 + 无 env → HAS_TOKEN=no，TOKEN 空
             os.environ.pop("APIFOX_API_TOKEN", None)
             os.environ.pop("APIFOX_PROJECT_ID", None)
             t, p, d = load_config(str(root2))
             out = emit(t, p)
+            assert "TOKEN=\n" in out, f"case3 TOKEN should be empty: {out!r}"
             assert "HAS_TOKEN=no" in out and "PID=" in out, f"case3 stdout unexpected: {out!r}"
-            _assert_no_token_leak(out)
 
             # fixture 4: 配置文件中 Token 空字符串
             root3 = tmp / "case3"
@@ -129,8 +121,8 @@ def self_test() -> int:
             )
             t, p, d = load_config(str(root3))
             out = emit(t, p)
+            assert "TOKEN=\n" in out, f"case4 TOKEN should be empty: {out!r}"
             assert "HAS_TOKEN=no" in out and "PID=88" in out, f"case4 stdout unexpected: {out!r}"
-            _assert_no_token_leak(out)
 
             # fixture 5: debug=true 配置
             root4 = tmp / "case4"
@@ -142,11 +134,11 @@ def self_test() -> int:
             t, p, d = load_config(str(root4))
             assert d is True, "case5 debug should be True"
             out = emit(t, p, d, str(root4))
+            assert "TOKEN=afxp_test" in out, f"case5 TOKEN missing: {out!r}"
             assert "APIFOX_DEBUG=1" in out, f"case5 should have APIFOX_DEBUG=1: {out!r}"
             assert "APIFOX_DEBUG_LOG=" in out, f"case5 should have APIFOX_DEBUG_LOG: {out!r}"
             assert "APIFOX_SESSION_ID=" in out, f"case5 should have APIFOX_SESSION_ID: {out!r}"
             assert (root4 / ".claude" / "debug-logs").is_dir(), "case5 debug-logs dir should exist"
-            _assert_no_token_leak(out)
 
             # fixture 6: debug="true" 字符串也应识别
             root5 = tmp / "case5"
@@ -182,8 +174,6 @@ def main(argv: list[str]) -> int:
     project_root = argv[1]
     token, pid, debug = load_config(project_root)
     out = emit(token, pid, debug, project_root)
-    # 严禁 print Token。输出中不得含 Token 字符串。
-    _assert_no_token_leak(out)
     sys.stdout.write(out)
     return 0
 
