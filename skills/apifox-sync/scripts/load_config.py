@@ -47,7 +47,8 @@ def load_config(project_root: str) -> tuple[str, str, bool]:
             cfg = {}
     token = os.environ.get("APIFOX_API_TOKEN") or cfg.get("apiToken", "") or ""
     pid = os.environ.get("APIFOX_PROJECT_ID") or cfg.get("projectId", "") or ""
-    debug = cfg.get("debug", False) is True
+    raw = cfg.get("debug", False)
+    debug = raw is True or (isinstance(raw, str) and raw.lower() == "true")
     return str(token), str(pid), debug
 
 
@@ -146,6 +147,16 @@ def self_test() -> int:
             assert "APIFOX_SESSION_ID=" in out, f"case5 should have APIFOX_SESSION_ID: {out!r}"
             assert (root4 / ".claude" / "debug-logs").is_dir(), "case5 debug-logs dir should exist"
             _assert_no_token_leak(out)
+
+            # fixture 6: debug="true" 字符串也应识别
+            root5 = tmp / "case5"
+            (root5 / ".claude").mkdir(parents=True)
+            (root5 / ".claude" / "apifox.json").write_text(
+                json.dumps({"apiToken": "afxp_test", "projectId": "66", "debug": "true"}),
+                encoding="utf-8",
+            )
+            t, p, d = load_config(str(root5))
+            assert d is True, "case6 debug='true' (string) should be True"
         finally:
             # 恢复 env
             for k, v in saved.items():

@@ -38,14 +38,20 @@ HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
 ## 步骤 4：保存配置
 
+合并写入，保留现有额外字段（如 `debug`）：
 ```bash
 mkdir -p "${PROJECT_ROOT}/.claude"
-cat > "${PROJECT_ROOT}/.claude/apifox.json" << EOF
-{
-  "apiToken": "${TOKEN}",
-  "projectId": "${PROJECT_ID}"
-}
-EOF
+python3 -c "
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / '.claude' / 'apifox.json'
+cfg = {}
+if p.is_file():
+    try: cfg = json.loads(p.read_text('utf-8'))
+    except Exception: pass
+cfg['apiToken'] = sys.argv[2]
+cfg['projectId'] = sys.argv[3]
+p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', 'utf-8')
+" "$PROJECT_ROOT" "$TOKEN" "$PROJECT_ID"
 ```
 
 提示：配置已保存到 `.claude/apifox.json`，建议加入 `.gitignore`（含 apiToken）。
