@@ -52,9 +52,16 @@ def load_config(project_root: str) -> tuple[str, str, bool]:
 
 
 def emit(token: str, pid: str, debug: bool = False, project_root: str = "") -> str:
-    """生成 stdout 内容，eval 后 TOKEN/PID/HAS_TOKEN 等变量直接可用。"""
+    """生成 stdout 内容，eval 后 TOKEN/PID/HAS_TOKEN 等变量直接可用。
+
+    debug=True 时额外写 .claude/.tmp/apifox-debug-env.sh，供后续 Bash
+    调用 source 以恢复 APIFOX_DEBUG_LOG / APIFOX_SESSION_ID 环境变量
+    （Claude Code 每次 Bash 调用是独立 shell，eval 设置的变量不跨调用保留）。
+    """
     has = "yes" if token else "no"
     lines = [f"TOKEN={token}", f"HAS_TOKEN={has}", f"PID={pid}"]
+    tmp_dir = Path(project_root) / ".claude" / ".tmp" if project_root else Path(".claude/.tmp")
+    env_file = tmp_dir / "apifox-debug-env.sh"
     if debug:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from debug_log import generate_session_id
@@ -66,8 +73,17 @@ def emit(token: str, pid: str, debug: bool = False, project_root: str = "") -> s
         lines.append("APIFOX_DEBUG=1")
         lines.append(f"APIFOX_DEBUG_LOG={log_path}")
         lines.append(f"APIFOX_SESSION_ID={sid}")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            f"export APIFOX_DEBUG=1\n"
+            f"export APIFOX_DEBUG_LOG={log_path}\n"
+            f"export APIFOX_SESSION_ID={sid}\n",
+            encoding="utf-8",
+        )
     else:
         lines.append("APIFOX_DEBUG=0")
+        if env_file.is_file():
+            env_file.unlink()
     return "\n".join(lines) + "\n"
 
 
@@ -139,6 +155,16 @@ def self_test() -> int:
             assert "APIFOX_DEBUG_LOG=" in out, f"case5 should have APIFOX_DEBUG_LOG: {out!r}"
             assert "APIFOX_SESSION_ID=" in out, f"case5 should have APIFOX_SESSION_ID: {out!r}"
             assert (root4 / ".claude" / "debug-logs").is_dir(), "case5 debug-logs dir should exist"
+            env_f = root4 / ".claude" / ".tmp" / "apifox-debug-env.sh"
+            assert env_f.is_file(), "case5 env file should exist"
+            env_content = env_f.read_text(encoding="utf-8")
+            assert "export APIFOX_DEBUG=1" in env_content, "case5 env file should export APIFOX_DEBUG"
+            assert "export APIFOX_DEBUG_LOG=" in env_content, "case5 env file should export APIFOX_DEBUG_LOG"
+            assert "export APIFOX_SESSION_ID=" in env_content, "case5 env file should export APIFOX_SESSION_ID"
+
+            # fixture 5b: debug=False 时应删除残留 env 文件
+            emit(t, p, False, str(root4))
+            assert not env_f.is_file(), "case5b env file should be removed when debug=False"
 
             # fixture 6: debug="true" 字符串也应识别
             root5 = tmp / "case5"

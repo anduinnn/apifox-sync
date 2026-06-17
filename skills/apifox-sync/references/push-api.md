@@ -5,9 +5,10 @@
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
 export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
+[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh" ] && source "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```
 
-**Debug 模式**：push 流程的 `APIFOX_DEBUG`/`APIFOX_DEBUG_LOG`/`APIFOX_SESSION_ID` 由 `push-parse.md` 步骤 2 的 eval 设置。当 `APIFOX_DEBUG=1` 时，curl 调用前后通过 `debug_log.py --format-entry` 记录日志：
+**Debug 模式**：debug 环境变量由 preamble 自动从 env 文件恢复。当 `APIFOX_DEBUG=1` 时，curl 调用前后通过 `debug_log.py --format-entry` 记录日志：
 ```bash
 if [ "$APIFOX_DEBUG" = "1" ]; then
   _start=$(python3 -c "import time; print(int(time.time()*1000))")
@@ -110,5 +111,6 @@ rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json \
       "${TMPPREFIX}"existing.json "${TMPPREFIX}"by-source.json \
       "${TMPPREFIX}"payload-update.json "${TMPPREFIX}"payload-create.json \
       "${TMPPREFIX}"rename-list.json "${TMPPREFIX}"rename-confirmed.json \
-      "${TMPPREFIX}"del-response.out
+      "${TMPPREFIX}"del-response.out \
+      "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```

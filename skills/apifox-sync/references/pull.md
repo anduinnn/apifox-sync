@@ -5,6 +5,7 @@
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
 export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
+[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh" ] && source "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```
 
 ## 步骤 1：加载配置
@@ -161,6 +162,7 @@ python3 skills/apifox-sync/scripts/pull_save.py "$PROJECT_ROOT"
 ```bash
 rm -f "${TMPPREFIX}export.json" "${TMPPREFIX}pull-diff.json" \
       "${TMPPREFIX}pull-approved.json" "${TMPPREFIX}folders.json" \
-      "${TMPPREFIX}existing.json" "${TMPPREFIX}by-source.json"
+      "${TMPPREFIX}existing.json" "${TMPPREFIX}by-source.json" \
+      "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 find "${PROJECT_ROOT}/.claude/.tmp" -maxdepth 1 -name "apifox-sync-pull-op-*.json" -delete 2>/dev/null
 ```
