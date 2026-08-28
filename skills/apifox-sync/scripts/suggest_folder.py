@@ -24,6 +24,7 @@ stderr / 退出码：
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -46,7 +47,8 @@ def suggest(export: dict, controller_fq: str) -> list[str]:
                 continue
             if detail.get("x-source-controller", "") == controller_fq:
                 folder = detail.get("x-apifox-folder", "")
-                counts[folder] = counts.get(folder, 0) + 1
+                if isinstance(folder, str):
+                    counts[folder] = counts.get(folder, 0) + 1
     return [f for f, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
@@ -80,6 +82,30 @@ def self_test() -> int:
     assert suggest(tie, "C") == ["乙", "甲"], suggest(tie, "C")
     # 5) paths 缺失不崩溃
     assert suggest({}, "C") == []
+    # 6) x-apifox-folder 非字符串（如 null）不应导致 TypeError，直接跳过该条
+    bad_type = {"paths": {
+        "/m": {"get": {"x-source-controller": "C", "x-apifox-folder": "正常"}},
+        "/n": {"get": {"x-source-controller": "C", "x-apifox-folder": None}},
+    }}
+    assert suggest(bad_type, "C") == ["正常"], suggest(bad_type, "C")
+    # 7) 真实文件加载路径：含非法 `\` 转义 + 非字符串 folder，走 load_json_loose + suggest
+    # 不应崩溃，且非字符串项被跳过（对齐 list_folders.py 的 tempfile 真实文件用例）
+    tmp = Path(tempfile.mkdtemp(prefix="apifox-sync-selftest-suggestfolder-"))
+    try:
+        p = tmp / "export.json"
+        p.write_text(
+            '{"paths": {'
+            '"/a": {"get": {"x-source-controller": "C", "x-apifox-folder": "路径\\测试"}}, '
+            '"/b": {"get": {"x-source-controller": "C", "x-apifox-folder": null}}'
+            '}}',
+            encoding="utf-8",
+        )
+        data = load_json_loose(str(p))
+        result = suggest(data, "C")
+        assert result == ["路径\\测试"], result
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
     print("SELFTEST_OK")
     return 0
 
