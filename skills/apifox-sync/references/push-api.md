@@ -27,11 +27,29 @@ fi
 
 **必须在步骤 9 之前执行**，spec 的 `x-apifox-folder` 需用户选择的路径。
 
-调用 export-openapi 获取全量数据 → 写入 `${TMPPREFIX}export.json`（`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 中止）：
+```bash
+HTTP=$(curl -s -o "${TMPPREFIX}export.json" -w "%{http_code}" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
+```
+
+⚠️ **`includeApifoxExtensionProperties: true` 必需**。漏掉则导出不含 `x-source-method-fq` / `x-apifox-folder` / `x-source-controller`，`push_index.py` 建出空索引，`push_classify.py` 会把**全部接口判为 create** 导致重复创建——且 counters 表面正常，故障完全静默。
+
+`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 中止。
+
 ```bash
 python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
+python3 "$SKILL_DIR/scripts/suggest_folder.py" "${TMPPREFIX}export.json" "<步骤3的全限定类名>"
 ```
-stdout 每行一个 folder（按字典序；空行代表根目录）。`AskUserQuestion` 选目标：现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建"再问路径。空输出 → 直接问根目录或新建。结果保存为 `TARGET_FOLDER` 传给步骤 9。
+
+第一条 stdout 每行一个 folder（按字典序；空行代表根目录）；第二条输出该 Controller 上次推送的 folder（可能为空）。
+
+`AskUserQuestion` 选目标：**若 `suggest_folder.py` 有输出，把首行作为第一个选项并标注「当前 Controller 上次推送位置」**，其后接其余现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建"再问路径。空输出 → 直接问根目录或新建。结果保存为 `TARGET_FOLDER` 传给步骤 9。
+
+**仍须询问**，不因有推荐就自动选定：选错目录代价高且事后难清理。
 
 ## 步骤 10：JSON 预验证
 

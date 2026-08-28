@@ -40,7 +40,19 @@ fi
 
 ## 步骤 2：获取目录结构
 
-调用 export-openapi 获取全量数据 → 写入 `${TMPPREFIX}export.json`（`200` 写文件；`401/403` 读 `references/init.md` 重配后重试；其他中止）：
+```bash
+HTTP=$(curl -s -o "${TMPPREFIX}export.json" -w "%{http_code}" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
+```
+
+⚠️ **`includeApifoxExtensionProperties: true` 必需**。漏掉则导出不含 `x-source-method-fq` / `x-apifox-folder` / `x-source-controller`，`pull_extract.py` 精简扩展字段时拿不到锚点。
+
+`200` 写文件；`401/403` 读 `references/init.md` 重配后重试；其他中止。
+
 ```bash
 python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
 ```
