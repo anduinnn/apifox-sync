@@ -32,8 +32,9 @@ stdout 摘要（改名模式）:
     已改名 N 个 schema（前缀 <前缀>）
       · <旧名> → <前缀><旧名>
       ...
-    若新名撞上既有 schema 或批次内互撞（如待改名集合同时含 Money 和
-    OrderMoney、前缀恰为 Order），不做任何修改，冲突清单打到 stderr，退出码 1。
+    若新名撞上「本次不改名的既有 schema」（链式改名——如待改名集合同时含
+    Money 和 OrderMoney、前缀恰为 Order——不算冲突，会正确改名），不做任何
+    修改，冲突清单打到 stderr，退出码 1。
 
 背景：推送时用 schemaOverwriteBehavior: OVERWRITE_EXISTING 提交
 components.schemas，同名 schema 直接覆盖、没有任何提示。响应 VO 中名为
@@ -167,18 +168,19 @@ def _rewrite_refs(node, mapping: dict[str, str]) -> None:
 def apply_prefix(spec: dict, names: set[str], prefix: str) -> int:
     """把 names 中的 schema 键加上 prefix，并同步全部 $ref。返回改名数量。
 
-    改名前预检两类冲突，命中任一类即不做任何修改、把冲突清单打到 stderr、
-    返回 -1（不是「改名数量」，调用方需按负数判定失败，不可当计数用）：
-      1. 新名撞上「本次不改名的既有 schema」（即 set(schemas) - set(mapping)）；
-      2. 批次内互撞——新名与批次内另一个待改名的旧键重合（如 names 同时含
-         Money 和 OrderMoney、prefix=Order 时，Money 的新名 OrderMoney 恰是
-         批次内另一个待改名的旧键），或两个不同旧名映射到同一新名。
-    这类冲突若放行，在原字典上 pop/assign 会因处理顺序不同而静默丢失/污染
-    其中一个 schema 的内容——这正是本功能要阻止的「静默覆盖」，故一律从严
-    拒绝、交给人决策，不做自动排序补救。
+    改名前预检真冲突：新名撞上「本次不改名的既有 schema」（即
+    kept = set(schemas) - set(mapping) 中的键）。命中即不做任何修改、把冲突
+    清单打到 stderr、返回 -1（不是「改名数量」，调用方需按负数判定失败，不可
+    当计数用）。
 
-    冲突之外的正常改名一次性重建 schemas 字典（而非在原字典上 pop/assign），
-    读的是改名前的原始内容，与处理顺序无关，交换式改名也安全。
+    链式改名（如 names 同时含 A 和 XA、prefix=X，A 的新名 XA 恰是批次内另一个
+    待改名的旧键）不是冲突：XA 这个名字正在被腾空，不构成真撞车。一次性重建
+    schemas 字典（而非在原字典上 pop/assign）天然让这种情形顺序无关且安全——
+    重建时读的是改名前的原始内容，不受处理顺序影响。
+
+    mapping 的值恒为 f"{prefix}{n}"，prefix 固定、names 互异时新名必然互异，
+    「两个不同旧名映射到同一新名」在当前构造下不可达；下面的重复目标检查留作
+    防御性代码，不指望它会触发。
     """
     schemas = spec.get("components", {}).get("schemas", {})
     mapping = {n: f"{prefix}{n}" for n in names if n in schemas}
@@ -188,12 +190,12 @@ def apply_prefix(spec: dict, names: set[str], prefix: str) -> int:
     targets = list(mapping.values())
     collisions = sorted({
         t for t in targets
-        if t in kept or t in mapping or targets.count(t) > 1
+        if t in kept or targets.count(t) > 1   # 后者当前不可达，见上方 docstring
     })
     if collisions:
         print("ERROR: 改名冲突，未做任何修改：", file=sys.stderr)
         for c in collisions:
-            print(f"  · {c} 已被占用（既有 schema 或批次内其它待改名项）", file=sys.stderr)
+            print(f"  · {c} 已被既有 schema 占用", file=sys.stderr)
         return -1
     new_schemas = {mapping.get(k, k): v for k, v in schemas.items()}
     spec["components"]["schemas"] = new_schemas
@@ -341,21 +343,33 @@ def self_test() -> int:
     assert n < 0, n   # 冲突不是「改名数量」，用负数区分，调用方不可当计数用
     assert spec5 == before5, "冲突时不应做任何修改"
 
-    # --apply-prefix 冲突守卫 2：批次内互撞
-    # names 同时含 Money 和 OrderMoney、prefix=Order：Money 的改名目标 OrderMoney
-    # 恰是批次内另一个待改名的旧键。按处理顺序在原字典上 pop/assign 会因顺序不同
-    # 而破坏其中一个 schema 的内容（不确定性 bug，取决于 set 迭代顺序）；必须整批
-    # 拒绝，不做自动排序补救。
+    # --apply-prefix 链式改名（不是冲突，必须成功）：names 同时含 A 和 XA、
+    # prefix=X 时，A 的新名 XA 恰是批次内另一个待改名的旧键——但 XA 这个名字
+    # 正在被腾空，不构成真撞车。一次性重建 schemas 字典应保证顺序无关地正确
+    # 完成：XA 拿到原 A 的内容，XXA 拿到原 XA 的内容，且两处 $ref 分别指向
+    # 正确的新名（不能互相混淆，也不能有一个仍留旧引用）。
     spec6 = {
+        "paths": {"/x": {"get": {
+            "responses": {"200": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {
+                    "a": {"$ref": "#/components/schemas/A"},
+                    "xa": {"$ref": "#/components/schemas/XA"},
+                }}}}}},
+        }}},
         "components": {"schemas": {
-            "Money": {"type": "object", "tag": "money-orig"},
-            "OrderMoney": {"type": "object", "tag": "order-money-orig"},
+            "A": {"type": "object", "tag": "a-orig"},
+            "XA": {"type": "object", "tag": "xa-orig"},
         }},
     }
-    before6 = json.loads(json.dumps(spec6, ensure_ascii=False))
-    n = apply_prefix(spec6, {"Money", "OrderMoney"}, "Order")
-    assert n < 0, n
-    assert spec6 == before6, "批次内互撞时不应做任何修改"
+    n = apply_prefix(spec6, {"A", "XA"}, "X")
+    assert n == 2, n
+    schemas6 = spec6["components"]["schemas"]
+    assert set(schemas6) == {"XA", "XXA"}, list(schemas6)
+    assert schemas6["XA"]["tag"] == "a-orig", schemas6["XA"]     # A 的内容随 A→XA 落到 XA
+    assert schemas6["XXA"]["tag"] == "xa-orig", schemas6["XXA"]  # XA 的内容随 XA→XXA 落到 XXA，未被途中覆盖丢失
+    props = spec6["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+    assert props["a"]["$ref"] == "#/components/schemas/XA", props["a"]
+    assert props["xa"]["$ref"] == "#/components/schemas/XXA", props["xa"]
 
     print("SELFTEST_OK")
     return 0
