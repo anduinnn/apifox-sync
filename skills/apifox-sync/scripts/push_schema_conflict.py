@@ -32,6 +32,8 @@ stdout 摘要（改名模式）:
     已改名 N 个 schema（前缀 <前缀>）
       · <旧名> → <前缀><旧名>
       ...
+    若新名撞上既有 schema 或批次内互撞（如待改名集合同时含 Money 和
+    OrderMoney、前缀恰为 Order），不做任何修改，冲突清单打到 stderr，退出码 1。
 
 背景：推送时用 schemaOverwriteBehavior: OVERWRITE_EXISTING 提交
 components.schemas，同名 schema 直接覆盖、没有任何提示。响应 VO 中名为
@@ -163,13 +165,38 @@ def _rewrite_refs(node, mapping: dict[str, str]) -> None:
 
 
 def apply_prefix(spec: dict, names: set[str], prefix: str) -> int:
-    """把 names 中的 schema 键加上 prefix，并同步全部 $ref。返回改名数量。"""
+    """把 names 中的 schema 键加上 prefix，并同步全部 $ref。返回改名数量。
+
+    改名前预检两类冲突，命中任一类即不做任何修改、把冲突清单打到 stderr、
+    返回 -1（不是「改名数量」，调用方需按负数判定失败，不可当计数用）：
+      1. 新名撞上「本次不改名的既有 schema」（即 set(schemas) - set(mapping)）；
+      2. 批次内互撞——新名与批次内另一个待改名的旧键重合（如 names 同时含
+         Money 和 OrderMoney、prefix=Order 时，Money 的新名 OrderMoney 恰是
+         批次内另一个待改名的旧键），或两个不同旧名映射到同一新名。
+    这类冲突若放行，在原字典上 pop/assign 会因处理顺序不同而静默丢失/污染
+    其中一个 schema 的内容——这正是本功能要阻止的「静默覆盖」，故一律从严
+    拒绝、交给人决策，不做自动排序补救。
+
+    冲突之外的正常改名一次性重建 schemas 字典（而非在原字典上 pop/assign），
+    读的是改名前的原始内容，与处理顺序无关，交换式改名也安全。
+    """
     schemas = spec.get("components", {}).get("schemas", {})
     mapping = {n: f"{prefix}{n}" for n in names if n in schemas}
     if not mapping:
         return 0
-    for old, new in mapping.items():
-        schemas[new] = schemas.pop(old)
+    kept = set(schemas) - set(mapping)
+    targets = list(mapping.values())
+    collisions = sorted({
+        t for t in targets
+        if t in kept or t in mapping or targets.count(t) > 1
+    })
+    if collisions:
+        print("ERROR: 改名冲突，未做任何修改：", file=sys.stderr)
+        for c in collisions:
+            print(f"  · {c} 已被占用（既有 schema 或批次内其它待改名项）", file=sys.stderr)
+        return -1
+    new_schemas = {mapping.get(k, k): v for k, v in schemas.items()}
+    spec["components"]["schemas"] = new_schemas
     _rewrite_refs(spec, mapping)
     return len(mapping)
 
@@ -183,7 +210,10 @@ def run_apply(spec_path: str, prefix: str, tmpprefix: str) -> int:
     names = {c["schema"] for c in conflicts}
     spec = load_json_loose(spec_path)
     n = apply_prefix(spec, names, prefix)
-    Path(spec_path).write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    if n < 0:
+        return 1
+    with open(spec_path, "w", encoding="utf-8") as f:
+        json.dump(spec, f, ensure_ascii=False)
     print(f"已改名 {n} 个 schema（前缀 {prefix}）")
     for name in sorted(names):
         print(f"  · {name} → {prefix}{name}")
@@ -296,6 +326,37 @@ def self_test() -> int:
     # 不存在的名字不报错、不计数
     assert apply_prefix(spec2, {"NotThere"}, "X") == 0
 
+    # --apply-prefix 冲突守卫 1：新名撞上「本次不改名的既有 schema」
+    # OrderMoney 是与 Money 改名目标同名、但并未列入本次改名清单的既有 schema，
+    # 若无守卫，pop/assign 会静默用 Money 的内容覆盖它——这正是本功能要防止的
+    # 静默覆盖，本身犯了同一种错误。
+    spec5 = {
+        "components": {"schemas": {
+            "Money": {"type": "object", "tag": "money-orig"},
+            "OrderMoney": {"type": "object", "tag": "unrelated-existing"},
+        }},
+    }
+    before5 = json.loads(json.dumps(spec5, ensure_ascii=False))
+    n = apply_prefix(spec5, {"Money"}, "Order")
+    assert n < 0, n   # 冲突不是「改名数量」，用负数区分，调用方不可当计数用
+    assert spec5 == before5, "冲突时不应做任何修改"
+
+    # --apply-prefix 冲突守卫 2：批次内互撞
+    # names 同时含 Money 和 OrderMoney、prefix=Order：Money 的改名目标 OrderMoney
+    # 恰是批次内另一个待改名的旧键。按处理顺序在原字典上 pop/assign 会因顺序不同
+    # 而破坏其中一个 schema 的内容（不确定性 bug，取决于 set 迭代顺序）；必须整批
+    # 拒绝，不做自动排序补救。
+    spec6 = {
+        "components": {"schemas": {
+            "Money": {"type": "object", "tag": "money-orig"},
+            "OrderMoney": {"type": "object", "tag": "order-money-orig"},
+        }},
+    }
+    before6 = json.loads(json.dumps(spec6, ensure_ascii=False))
+    n = apply_prefix(spec6, {"Money", "OrderMoney"}, "Order")
+    assert n < 0, n
+    assert spec6 == before6, "批次内互撞时不应做任何修改"
+
     print("SELFTEST_OK")
     return 0
 
@@ -308,7 +369,7 @@ def main(argv: list[str]) -> int:
         return self_test()
     if len(argv) == 4 and argv[2] == "--apply-prefix":
         mode, summary = "apply", f"spec={argv[1]} prefix={argv[3]}"
-    elif len(argv) == 3:
+    elif len(argv) == 3 and argv[2] != "--apply-prefix":
         mode, summary = "detect", f"spec={argv[1]} export={argv[2]}"
     else:
         print("Usage: push_schema_conflict.py <spec_json> <export_json> "
