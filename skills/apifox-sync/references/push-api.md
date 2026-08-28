@@ -62,6 +62,28 @@ python3 "$SKILL_DIR/scripts/verify_json.py" "${TMPPREFIX}spec.json"
 ```
 失败 → 按 line/col/msg 定位修复（未转义引号、尾逗号、注释），最多 3 次。
 
+## 步骤 10.5：schema 命名冲突预检
+
+**必须在步骤 11 任何写操作之前**。push 以 `OVERWRITE_EXISTING` 提交 schema，同名即覆盖且无提示。
+
+```bash
+python3 "$SKILL_DIR/scripts/push_schema_conflict.py" "${TMPPREFIX}spec.json" "${TMPPREFIX}export.json"
+```
+
+输出 `schema 冲突: 0 个` → 直接进入步骤 11。
+
+否则用 `AskUserQuestion` 展示冲突清单（schema 名 + 占用方 Controller），三选一：
+
+- **自动加前缀改名**：前缀取本次 Controller 简单类名去掉 `Controller` 后缀
+  ```bash
+  python3 "$SKILL_DIR/scripts/push_schema_conflict.py" "${TMPPREFIX}spec.json" --apply-prefix "<前缀>"
+  ```
+  改名后**必须重跑步骤 10 的 `verify_json.py`** 确认 spec 仍合法。
+- **确认覆盖**：原样进入步骤 11。
+- **中止**：停止推送，不做任何远端写操作。
+
+标注「来源未知」的是远端存在但无接口引用的孤儿 schema，或缺 `x-source-controller` 的历史接口——无法证明同源，故从严计入冲突。
+
 ## 步骤 11：推送到 Apifox
 
 ### 11.1 构建双向索引
@@ -128,5 +150,6 @@ rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json \
       "${TMPPREFIX}"payload-update.json "${TMPPREFIX}"payload-create.json \
       "${TMPPREFIX}"rename-list.json "${TMPPREFIX}"rename-confirmed.json \
       "${TMPPREFIX}"del-response.out \
+      "${TMPPREFIX}"schema-conflicts.json \
       "${TMPPREFIX}"env.sh "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```

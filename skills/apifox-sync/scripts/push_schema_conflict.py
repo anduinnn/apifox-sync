@@ -1,38 +1,50 @@
 #!/usr/bin/env python3
-"""检测本次推送是否会静默覆盖「非本次来源」的远端 schema（命名冲突检测）。
+"""检测本次推送是否会静默覆盖「非本次来源」的远端 schema，并支持加前缀改名。
 
 用法：
     python3 push_schema_conflict.py <spec_json> <export_json>
+    python3 push_schema_conflict.py <spec_json> --apply-prefix <前缀>
     python3 push_schema_conflict.py -h
     python3 push_schema_conflict.py --self-test
 
-argv:
+argv（检测模式）:
     <spec_json>    本地生成的 OpenAPI spec 文件（通常是 ${TMPPREFIX}spec.json）
     <export_json>  Apifox export-openapi 写入的 JSON 文件（通常是 ${TMPPREFIX}export.json）
 
+argv（改名模式）:
+    <spec_json>  待改名的 OpenAPI spec 文件，就地重写
+    <前缀>       加在冲突 schema 名前的前缀（如 Controller 简单类名去掉 Controller 后缀）
+
 env:
-    TMPPREFIX  临时文件路径前缀（用于写 schema-conflicts.json）
+    TMPPREFIX  临时文件路径前缀（检测模式用于写 schema-conflicts.json；
+               改名模式用于读取同一份 schema-conflicts.json 取待改名清单）
 
 输出（仅在检出冲突时写入文件，走 TMPPREFIX）:
     ${TMPPREFIX}schema-conflicts.json   [{"schema": str, "owners": [str, ...]}, ...]
 
-stdout 摘要:
+stdout 摘要（检测模式）:
     schema 冲突: N 个
       · <schema>  被占用: <controller1>、<controller2>
       ...
     （有冲突时追加一行覆盖提示）
 
+stdout 摘要（改名模式）:
+    已改名 N 个 schema（前缀 <前缀>）
+      · <旧名> → <前缀><旧名>
+      ...
+
 背景：推送时用 schemaOverwriteBehavior: OVERWRITE_EXISTING 提交
 components.schemas，同名 schema 直接覆盖、没有任何提示。响应 VO 中名为
 Location/Detail/Item 这类通用名的静态内部类，schema 名会落成简单类名；若
 远端已有别的 Controller 建的同名 schema，会被静默覆盖，引用它的其他接口
-文档随之失真。本脚本只做检测：以 export.json 的 components.schemas 建图
+文档随之失真。检测模式：以 export.json 的 components.schemas 建图
 （schema → 它引用的 schema），从每个 operation 直接 $ref 出发做 BFS 传播
 归属（传递闭包），据此判断本次 spec 会覆盖到哪些「非本次来源」的远端
-schema。不含改名逻辑（Task 4 在此基础上接入改名并接进 push 管线）。
+schema。改名模式：读取检测模式写下的 schema-conflicts.json，把其中列出的
+schema 键加前缀并同步重写 spec 内所有指向它们的 $ref，就地覆盖 spec_json。
 
 退出码：
-    0 成功（有无冲突都算成功执行，是否阻断由对话层决策）
+    0 成功（检测模式有无冲突都算成功执行，是否阻断由对话层决策）
     1 运行时错误
     2 参数用法错误
 """
@@ -135,6 +147,49 @@ def run_detect(spec_path: str, export_path: str, tmpprefix: str) -> int:
     return 0
 
 
+def _rewrite_refs(node, mapping: dict[str, str]) -> None:
+    """就地重写节点内所有指向 mapping 旧名的 $ref。"""
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+            old = ref.rsplit("/", 1)[-1]
+            if old in mapping:
+                node["$ref"] = f"#/components/schemas/{mapping[old]}"
+        for v in node.values():
+            _rewrite_refs(v, mapping)
+    elif isinstance(node, list):
+        for v in node:
+            _rewrite_refs(v, mapping)
+
+
+def apply_prefix(spec: dict, names: set[str], prefix: str) -> int:
+    """把 names 中的 schema 键加上 prefix，并同步全部 $ref。返回改名数量。"""
+    schemas = spec.get("components", {}).get("schemas", {})
+    mapping = {n: f"{prefix}{n}" for n in names if n in schemas}
+    if not mapping:
+        return 0
+    for old, new in mapping.items():
+        schemas[new] = schemas.pop(old)
+    _rewrite_refs(spec, mapping)
+    return len(mapping)
+
+
+def run_apply(spec_path: str, prefix: str, tmpprefix: str) -> int:
+    conflict_file = Path(f"{tmpprefix}schema-conflicts.json")
+    if not conflict_file.is_file():
+        print("无冲突清单，跳过改名")
+        return 0
+    conflicts = json.loads(conflict_file.read_text(encoding="utf-8"))
+    names = {c["schema"] for c in conflicts}
+    spec = load_json_loose(spec_path)
+    n = apply_prefix(spec, names, prefix)
+    Path(spec_path).write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    print(f"已改名 {n} 个 schema（前缀 {prefix}）")
+    for name in sorted(names):
+        print(f"  · {name} → {prefix}{name}")
+    return 0
+
+
 def self_test() -> int:
     export = {
         "paths": {
@@ -212,6 +267,35 @@ def self_test() -> int:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # --apply-prefix：键改名 + 全部 $ref 同步（含数组、allOf 等嵌套位置）
+    spec2 = {
+        "paths": {"/u": {"get": {
+            "responses": {"200": {"content": {"application/json": {
+                "schema": {"type": "array",
+                           "items": {"$ref": "#/components/schemas/Money"}}}}}},
+        }}},
+        "components": {"schemas": {
+            "Money": {"type": "object"},
+            "Order": {"type": "object", "allOf": [
+                {"$ref": "#/components/schemas/Money"},
+                {"type": "object",
+                 "properties": {"m": {"$ref": "#/components/schemas/Money"}}},
+            ]},
+        }},
+    }
+    n = apply_prefix(spec2, {"Money"}, "Order")
+    assert n == 1, n
+    schemas2 = spec2["components"]["schemas"]
+    assert "OrderMoney" in schemas2 and "Money" not in schemas2, list(schemas2)
+    # 未列入改名的 schema 保持原名
+    assert "Order" in schemas2
+    # 所有 $ref 均已重写，spec 中不应再出现旧引用
+    dumped = json.dumps(spec2, ensure_ascii=False)
+    assert "#/components/schemas/Money" not in dumped, dumped
+    assert dumped.count("#/components/schemas/OrderMoney") == 3, dumped
+    # 不存在的名字不报错、不计数
+    assert apply_prefix(spec2, {"NotThere"}, "X") == 0
+
     print("SELFTEST_OK")
     return 0
 
@@ -222,8 +306,13 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
         return self_test()
-    if len(argv) != 3:
-        print("Usage: push_schema_conflict.py <spec_json> <export_json> | -h | --self-test",
+    if len(argv) == 4 and argv[2] == "--apply-prefix":
+        mode, summary = "apply", f"spec={argv[1]} prefix={argv[3]}"
+    elif len(argv) == 3:
+        mode, summary = "detect", f"spec={argv[1]} export={argv[2]}"
+    else:
+        print("Usage: push_schema_conflict.py <spec_json> <export_json> "
+              "| <spec_json> --apply-prefix <前缀> | -h | --self-test",
               file=sys.stderr)
         return 2
     tmpprefix = os.environ.get("TMPPREFIX")
@@ -231,13 +320,17 @@ def main(argv: list[str]) -> int:
         print("ERROR: env TMPPREFIX is required", file=sys.stderr)
         return 1
     _t0 = time.time()
-    rc = run_detect(argv[1], argv[2], tmpprefix)
-    if rc == 0:
-        debug_log("push.push_schema_conflict", "success", int((time.time() - _t0) * 1000),
-                  input_summary=f"spec={argv[1]} export={argv[2]}")
+    if mode == "apply":
+        rc = run_apply(argv[1], argv[3], tmpprefix)
+        step = "push.push_schema_conflict.apply"
     else:
-        debug_log("push.push_schema_conflict", "error", int((time.time() - _t0) * 1000),
-                  input_summary=f"spec={argv[1]} export={argv[2]}", error_detail=f"exit={rc}")
+        rc = run_detect(argv[1], argv[2], tmpprefix)
+        step = "push.push_schema_conflict"
+    if rc == 0:
+        debug_log(step, "success", int((time.time() - _t0) * 1000), input_summary=summary)
+    else:
+        debug_log(step, "error", int((time.time() - _t0) * 1000),
+                  input_summary=summary, error_detail=f"exit={rc}")
     return rc
 
 

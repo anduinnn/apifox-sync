@@ -41,7 +41,9 @@ Apifox 接口同步工具，支持双向操作：
 | 7 | `references/enum-detection.md` | Integer 字段匹配枚举，提取 code+desc |
 | 8 | `references/push-api.md` 步骤 8 | export-openapi 获取文件夹，AskUserQuestion 选目标 |
 | 9 | `references/openapi-gen.md` | 组装 OpenAPI 3.0 JSON，写入 spec |
-| 10-12 | `references/push-api.md` 步骤 10-12 | JSON 预验证、分类推送（锚点匹配/死接口清理/import）、报告 |
+| 10 | `references/push-api.md` 步骤 10 | JSON 预验证 |
+| 10.5 | `references/push-api.md` 步骤 10.5 | schema 命名冲突预检，冲突时交互决策 |
+| 11-12 | `references/push-api.md` 步骤 11-12 | 分类推送（锚点匹配/死接口清理/import）、回读校验、报告 |
 
 ---
 
