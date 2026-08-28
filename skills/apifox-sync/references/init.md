@@ -4,9 +4,27 @@
 
 ## 步骤 1：读取现有配置
 
+`init` 可脱离 push/pull 单独运行，拿不到它们写出的 `env.sh`，需完整 bootstrap 解析 `SKILL_DIR`：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
+mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
+export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
+SKILL_DIR=""
+for c in "${CLAUDE_PLUGIN_ROOT}/skills/apifox-sync" "${CLAUDE_PLUGIN_ROOT}" \
+         "$(python3 -c 'import json,pathlib;d=json.loads((pathlib.Path.home()/".claude/plugins/installed_plugins.json").read_text("utf-8"));print(next((e[0]["installPath"] for k,e in d.get("plugins",{}).items() if k.split("@")[0]=="apifox-sync" and e),""))' 2>/dev/null)/skills/apifox-sync" \
+         "$PROJECT_ROOT/skills/apifox-sync"; do
+  [ -f "$c/scripts/load_config.py" ] && SKILL_DIR="$c" && break
+done
+[ -z "$SKILL_DIR" ] && echo "ERROR: 无法定位 apifox-sync skill 目录" && exit 1
+cat > "${TMPPREFIX}env.sh" <<EOF
+export SKILL_DIR="$SKILL_DIR"
+export PROJECT_ROOT="$PROJECT_ROOT"
+export TMPPREFIX="$TMPPREFIX"
+eval "\$(python3 "\$SKILL_DIR/scripts/load_config.py" "\$PROJECT_ROOT")"
+export PROJECT_ID="\${APIFOX_PROJECT_ID:-\$PID}"
+export TOKEN PID PROJECT_ID APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
+EOF
+source "${TMPPREFIX}env.sh"
 echo "HAS_TOKEN=$HAS_TOKEN" && echo "PID=$PID"
 ```
 若 `HAS_TOKEN=yes`，告知"已检测到现有配置（Token: 已配置, ProjectId: ${PID}）"并询问是否覆盖。

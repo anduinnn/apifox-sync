@@ -3,9 +3,7 @@
 临时文件统一放 `.claude/.tmp/`。每次 Bash 调用开头：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
-export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
-[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh" ] && source "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
+source "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh"
 ```
 
 **Debug 模式**：debug 环境变量由 preamble 自动从 env 文件恢复。当 `APIFOX_DEBUG=1` 时，curl 调用前后通过 `debug_log.py --format-entry` 记录日志：
@@ -17,7 +15,7 @@ fi
 if [ "$APIFOX_DEBUG" = "1" ]; then
   _end=$(python3 -c "import time; print(int(time.time()*1000))")
   _dur=$((_end - _start))
-  python3 skills/apifox-sync/scripts/debug_log.py --format-entry \
+  python3 "$SKILL_DIR/scripts/debug_log.py" --format-entry \
     --session-id "$APIFOX_SESSION_ID" --step "push.<step_name>" \
     --status "success" --duration-ms "$_dur" --http-status "$_http_code" \
     --command "curl *** <url>" >> "$APIFOX_DEBUG_LOG"
@@ -31,7 +29,7 @@ fi
 
 调用 export-openapi 获取全量数据 → 写入 `${TMPPREFIX}export.json`（`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 中止）：
 ```bash
-python3 skills/apifox-sync/scripts/list_folders.py "${TMPPREFIX}export.json"
+python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
 ```
 stdout 每行一个 folder（按字典序；空行代表根目录）。`AskUserQuestion` 选目标：现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建"再问路径。空输出 → 直接问根目录或新建。结果保存为 `TARGET_FOLDER` 传给步骤 9。
 
@@ -42,7 +40,7 @@ stdout 每行一个 folder（按字典序；空行代表根目录）。`AskUserQ
 cat > "${TMPPREFIX}spec.json" << 'SPECEOF'
 {生成的 JSON}
 SPECEOF
-python3 skills/apifox-sync/scripts/verify_json.py "${TMPPREFIX}spec.json"
+python3 "$SKILL_DIR/scripts/verify_json.py" "${TMPPREFIX}spec.json"
 ```
 失败 → 按 line/col/msg 定位修复（未转义引号、尾逗号、注释），最多 3 次。
 
@@ -51,14 +49,14 @@ python3 skills/apifox-sync/scripts/verify_json.py "${TMPPREFIX}spec.json"
 ### 11.1 构建双向索引
 
 ```bash
-python3 skills/apifox-sync/scripts/push_index.py "${TMPPREFIX}export.json"
+python3 "$SKILL_DIR/scripts/push_index.py" "${TMPPREFIX}export.json"
 ```
 写 `existing.json`（`METHOD:path` → folders）和 `by-source.json`（`x-source-method-fq` → 接口元数据）。
 
 ### 11.2 分类并生成 payload
 
 ```bash
-python3 skills/apifox-sync/scripts/push_classify.py "${TMPPREFIX}spec.json"
+python3 "$SKILL_DIR/scripts/push_classify.py" "${TMPPREFIX}spec.json"
 ```
 四类：**update**（锚点命中 & path+method 同）→ `AUTO_MERGE`；**rename**（锚点命中 & path/method 变）→ 死接口清单；**create**（锚点未命中 & 无冲突）→ `CREATE_NEW`；**skip**（跨文件夹冲突）。按需写 `payload-update.json`/`payload-create.json`/`rename-list.json`，打印摘要。
 
@@ -83,7 +81,7 @@ if [ -f "${TMPPREFIX}rename-confirmed.json" ]; then
       "https://api.apifox.com/v1/projects/${PROJECT_ID}/http-apis/${api_id}" \
       -H "Authorization: Bearer ${TOKEN}" -H "X-Apifox-Api-Version: 2024-03-28")
     echo "DELETE ${label} -> HTTP ${R}"
-  done < <(python3 skills/apifox-sync/scripts/push_delete_list.py)
+  done < <(python3 "$SKILL_DIR/scripts/push_delete_list.py")
 fi
 ```
 
@@ -112,5 +110,5 @@ rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json \
       "${TMPPREFIX}"payload-update.json "${TMPPREFIX}"payload-create.json \
       "${TMPPREFIX}"rename-list.json "${TMPPREFIX}"rename-confirmed.json \
       "${TMPPREFIX}"del-response.out \
-      "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
+      "${TMPPREFIX}"env.sh "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```

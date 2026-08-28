@@ -88,5 +88,6 @@ pull 参数解析（**步骤 2.5 由 `detect_mode.py` 脚本自动完成**）：
 4. **不可解析类型**：降级为 `{type: object}`，不中断流程
 5. **敏感信息**：Token 存于 `.claude/apifox.json`，建议加 `.gitignore`；也可用 `APIFOX_API_TOKEN` 环境变量。**禁止明文输出 Token**
 6. **PROJECT_ROOT 定位**：统一使用 `PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")`
-7. **幂等性**：同文件夹重复推送同一 Controller 使用 `AUTO_MERGE`；推到不同文件夹则 `CREATE_NEW`。**已知限制**：同 path+method 跨文件夹已存在时后续更新可能不准确
+7. **SKILL_DIR 定位**：脚本不在用户项目内，须经三级降级解析：`$CLAUDE_PLUGIN_ROOT` → `~/.claude/plugins/installed_plugins.json` 的 `installPath` → `$PROJECT_ROOT/skills/apifox-sync`。由 push 步骤 2 / pull 步骤 1 / init 步骤 1 的 bootstrap 一次性写入 `${TMPPREFIX}env.sh`，后续 Bash 调用只需 `source`
+8. **幂等性**：同文件夹重复推送同一 Controller 使用 `AUTO_MERGE`；推到不同文件夹则 `CREATE_NEW`。**已知限制**：同 path+method 跨文件夹已存在时后续更新可能不准确
 # test
