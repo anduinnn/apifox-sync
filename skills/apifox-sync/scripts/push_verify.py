@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""比对推送后回读的远端数据与本次生成的 spec，校验 folder、锚点、schema 字段一致性。
+"""比对推送后回读的远端数据与本次**实际推送**的内容，校验 folder、锚点、schema 字段一致性。
 
 用法：
-    python3 push_verify.py <spec_json> <remote_json>
+    python3 push_verify.py <remote_json>
     python3 push_verify.py -h
     python3 push_verify.py --self-test
 
 argv:
-    <spec_json>    本次推送生成的 OpenAPI spec 文件（通常是 ${TMPPREFIX}spec.json）
     <remote_json>  推送完成后重新 export-openapi 得到的回读文件
                    （通常是 ${TMPPREFIX}verify.json）
+
+env:
+    TMPPREFIX  用于定位本次实际提交的 payload-update.json / payload-create.json
+               （由 push_classify.py 按需写入，步骤 12 才清理，本步骤仍在）
 
 stdout 摘要:
     全部通过：`✅ 回读校验通过：接口、folder、锚点、schema 字段均与本次推送一致`
     有不一致：`❌ 回读校验发现 N 处不一致：` 后逐条列出问题描述
+    本次无实际推送：`⚠️ 本次无接口实际提交（全部为跳过冲突或无变更），跳过回读校验`
 
 背景：`import-openapi` 返回的 counters（如 endpointCreated）只说明请求被
 Apifox 接受，不能证明 folder 落对了、schema 字段落全了、`x-source-method-fq`
@@ -24,14 +28,27 @@ Apifox 接受，不能证明 folder 落对了、schema 字段落全了、`x-sour
 如预期生效（例如命中了别的 Controller 的同名 schema、或 Apifox 端有缓存/
 异步落库延迟），因此本模块把两者都判定为不一致。
 
+**校验基准 = 本次实际推送，而非本次生成的完整 spec**：`push_classify.py`
+对「目标 folder 与其他 folder 同时存在同 path+method」的接口走 skip 分支，
+既不进 update 批次也不进 create 批次，从未提交给 Apifox；这些接口远端仍是
+旧状态、大概率没有 `x-source-method-fq` 锚点。若仍以完整 spec 为基准比对，
+skip 接口必然报「锚点不符」/「folder 不符」，与「跳过(冲突)」重复告知同一
+批接口、且是确定性假警报。因此改为读取 `payload-update.json` /
+`payload-create.json`（两者的 `input` 字段是本批次实际提交的 spec 子集，
+`components` 是完整本地 spec 的深拷贝，参见 push_classify.py::build_spec，
+两批次的 components 内容相同）合并出「本次实际推送的 spec」作为比对基准；
+两个文件都不存在时代表本次全部接口被跳过、未发生任何实际推送，此时优雅
+退出（不报错、也不误判为「校验通过」），不比对任何内容。
+
 退出码：
-    0 全部一致
+    0 全部一致，或本次无实际推送
     1 存在不一致，或运行时错误
     2 参数用法错误
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -110,10 +127,48 @@ def verify(spec: dict, remote: dict) -> list[str]:
     return problems
 
 
-def run(spec_path: str, remote_path: str) -> int:
-    spec = load_json_loose(spec_path)
+def load_pushed_spec(tmpprefix: str) -> dict | None:
+    """从本次实际提交的 payload 文件重建「已推送 spec」，用作回读校验基准。
+
+    payload-update.json / payload-create.json 由 push_classify.py 按需写入
+    （skip 的接口两者都不进，见模块 docstring）。两者的 "input" 字段是 JSON
+    字符串形式的 spec，paths 为本批次子集，components 是完整本地 spec 的
+    深拷贝（build_spec 对同一个 base spec 深拷贝，两批次的 components 内容
+    相同，取任一份即可）。合并两批次的 paths 即为本次实际推送的接口全集。
+
+    两个文件都不存在（本次全部接口被跳过，未发生任何实际推送）时返回 None，
+    调用方应据此优雅退出，不得当作「无问题」直接判定校验通过。这两个文件是
+    本工具自己用 json.dump 写出的，非 Apifox 导出，故用 json.loads 而非
+    load_json_loose 读取。
+    """
+    paths: dict = {}
+    components: dict = {}
+    found = False
+    for name in ("payload-update.json", "payload-create.json"):
+        p = Path(f"{tmpprefix}{name}")
+        if not p.is_file():
+            continue
+        found = True
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        batch_spec = json.loads(payload["input"])
+        batch_paths = batch_spec.get("paths", {})
+        if isinstance(batch_paths, dict):
+            paths.update(batch_paths)
+        batch_components = batch_spec.get("components", {})
+        if isinstance(batch_components, dict):
+            components = batch_components
+    if not found:
+        return None
+    return {"paths": paths, "components": components}
+
+
+def run(remote_path: str, tmpprefix: str) -> int:
+    pushed = load_pushed_spec(tmpprefix)
+    if pushed is None:
+        print("⚠️ 本次无接口实际提交（全部为跳过冲突或无变更），跳过回读校验")
+        return 0
     remote = load_json_loose(remote_path)
-    problems = verify(spec, remote)
+    problems = verify(pushed, remote)
     if not problems:
         print("✅ 回读校验通过：接口、folder、锚点、schema 字段均与本次推送一致")
         return 0
@@ -181,6 +236,91 @@ def self_test() -> int:
     problems8 = verify(spec, malformed_remote)
     assert any("远端不存在" in p for p in problems8), problems8
 
+    # 9) I2：校验基准必须是本次实际推送（payload-update/create.json 合并出的
+    #    路径集合），而非本次生成的完整 spec——跳过(冲突)的接口从未进入任何
+    #    payload，不应被回读校验误判为不一致。
+    import shutil
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="apifox-sync-selftest-pushverify-"))
+    try:
+        prefix = str(tmp) + "/apifox-sync-"
+        pushed_schemas = {"UserVO": {"properties": {"id": {}, "name": {}}}}
+        update_batch_spec = {
+            "paths": {"/a": {"get": {
+                "x-apifox-folder": "用户管理",
+                "x-source-method-fq": "UserController#list",
+            }}},
+            "components": {"schemas": pushed_schemas},
+        }
+        create_batch_spec = {
+            "paths": {"/b": {"post": {
+                "x-apifox-folder": "用户管理",
+                "x-source-method-fq": "UserController#create",
+            }}},
+            "components": {"schemas": pushed_schemas},
+        }
+        Path(f"{prefix}payload-update.json").write_text(
+            json.dumps({"input": json.dumps(update_batch_spec, ensure_ascii=False),
+                        "options": {}}, ensure_ascii=False), encoding="utf-8")
+        Path(f"{prefix}payload-create.json").write_text(
+            json.dumps({"input": json.dumps(create_batch_spec, ensure_ascii=False),
+                        "options": {}}, ensure_ascii=False), encoding="utf-8")
+
+        pushed = load_pushed_spec(prefix)
+        assert set(pushed["paths"]) == {"/a", "/b"}, pushed["paths"]
+        assert pushed["components"]["schemas"] == pushed_schemas
+
+        # 故意在同目录写一份包含 /skipped 的 spec.json——新实现必须完全不读
+        # 它，只认 payload-update/create.json，避免有人"顺手"把完整 spec
+        # 加回校验基准。/skipped 模拟被跳过(冲突)的旧接口：折叠 folder 与
+        # 完整本地 spec 期望的不一致（因为它从未被推送，远端还是旧状态）。
+        full_local_spec = {
+            "paths": {
+                "/a": update_batch_spec["paths"]["/a"],
+                "/b": create_batch_spec["paths"]["/b"],
+                "/skipped": {"get": {"x-apifox-folder": "旧目录",
+                                      "x-source-method-fq": "UserController#skipped"}},
+            },
+            "components": {"schemas": pushed_schemas},
+        }
+        Path(f"{prefix}spec.json").write_text(
+            json.dumps(full_local_spec, ensure_ascii=False), encoding="utf-8")
+        pushed_again = load_pushed_spec(prefix)
+        assert set(pushed_again["paths"]) == {"/a", "/b"}, pushed_again["paths"]
+
+        # 远端：/a、/b 均一致；/skipped 是被跳过的旧接口，折叠在错误目录——
+        # 若校验基准仍是完整 spec（含 /skipped）就会因它报错；用 payload
+        # 合并出的基准则不应触及它
+        remote = {
+            "paths": {
+                "/a": {"get": {"x-apifox-folder": "用户管理",
+                               "x-source-method-fq": "UserController#list"}},
+                "/b": {"post": {"x-apifox-folder": "用户管理",
+                                "x-source-method-fq": "UserController#create"}},
+                "/skipped": {"get": {"x-apifox-folder": "错误目录"}},
+            },
+            "components": {"schemas": pushed_schemas},
+        }
+        assert verify(pushed_again, remote) == [], verify(pushed_again, remote)
+        # 反证：若仍以完整 spec 为基准，/skipped 的 folder 不符必然被捕获——
+        # 证明本用例确实会区分「正确基准」与「错误基准」，不是弱断言
+        assert verify(full_local_spec, remote) != []
+
+        remote_path = tmp / "remote.json"
+        remote_path.write_text(json.dumps(remote, ensure_ascii=False), encoding="utf-8")
+        rc = run(str(remote_path), prefix)
+        assert rc == 0
+
+        # 两个 payload 文件都不存在（本次全部跳过，未发生任何实际推送）→
+        # 优雅退出（rc=0），不得当作「校验通过」或「校验失败」误报
+        empty_prefix = str(tmp) + "/empty-"
+        assert load_pushed_spec(empty_prefix) is None
+        rc_empty = run(str(remote_path), empty_prefix)
+        assert rc_empty == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     print("SELFTEST_OK")
     return 0
 
@@ -191,13 +331,17 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 2 and argv[1] == "--self-test":
         return self_test()
-    if len(argv) != 3:
-        print("Usage: push_verify.py <spec_json> <remote_json> | -h | --self-test",
+    if len(argv) != 2:
+        print("Usage: push_verify.py <remote_json> | -h | --self-test",
               file=sys.stderr)
         return 2
+    tmpprefix = os.environ.get("TMPPREFIX")
+    if not tmpprefix:
+        print("ERROR: env TMPPREFIX is required", file=sys.stderr)
+        return 1
     _t0 = time.time()
-    rc = run(argv[1], argv[2])
-    summary = f"spec={argv[1]} remote={argv[2]}"
+    rc = run(argv[1], tmpprefix)
+    summary = f"remote={argv[1]}"
     if rc == 0:
         debug_log("push.push_verify", "success", int((time.time() - _t0) * 1000),
                   input_summary=summary)

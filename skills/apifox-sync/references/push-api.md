@@ -1,8 +1,9 @@
-# Push 步骤 8、10-12：文件夹选择、验证、推送、报告
+# Push 步骤 8、10-12（含 10.5）：文件夹选择、验证、schema 冲突预检、推送、报告
 
 临时文件统一放 `.claude/.tmp/`。每次 Bash 调用开头：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh" ] || { echo "ERROR: 未初始化，请先执行步骤 2"; exit 1; }
 source "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh"
 ```
 
@@ -38,12 +39,17 @@ HTTP=$(curl -s -o "${TMPPREFIX}export.json" -w "%{http_code}" -X POST \
 
 ⚠️ **`includeApifoxExtensionProperties: true` 必需**。漏掉则导出不含 `x-source-method-fq` / `x-apifox-folder` / `x-source-controller`，`push_index.py` 建出空索引，`push_classify.py` 会把**全部接口判为 create** 导致重复创建——且 counters 表面正常，故障完全静默。
 
-`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 中止。
+`curl -o` 不论状态码都会把响应体写进 `export.json`；非 `200` 时它是 Apifox 错误 JSON。步骤 10.5 的冲突预检以这份文件为唯一输入，若不检查状态码就继续，`list_folders.py` 对错误体输出为空会被误判为"项目中尚无接口"而放行推送，最终导致上一段所述的同一条故障链（空索引 → 全部判 create → 重复创建）——**必须先检查状态码，非 200 直接中止，不得继续到 `list_folders.py`**：
 
 ```bash
+if [ "$HTTP" != "200" ]; then
+  echo "❌ 导出失败（HTTP ${HTTP}），中止推送"
+  exit 1
+fi
 python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
 python3 "$SKILL_DIR/scripts/suggest_folder.py" "${TMPPREFIX}export.json" "<步骤3的全限定类名>"
 ```
+`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 排查响应体后重试。
 
 第一条 stdout 每行一个 folder（按字典序；空行代表根目录）；第二条输出该 Controller 上次推送的 folder（可能为空）。
 
@@ -78,8 +84,8 @@ python3 "$SKILL_DIR/scripts/push_schema_conflict.py" "${TMPPREFIX}spec.json" "${
   ```bash
   python3 "$SKILL_DIR/scripts/push_schema_conflict.py" "${TMPPREFIX}spec.json" --apply-prefix "<前缀>"
   ```
-  改名后**必须重跑步骤 10 的 `verify_json.py`** 确认 spec 仍合法。
-- **确认覆盖**：原样进入步骤 11。
+  改名后**必须重跑步骤 10 的 `verify_json.py`** 确认 spec 仍合法，**并重跑本步骤开头的检测命令**（`push_schema_conflict.py "${TMPPREFIX}spec.json" "${TMPPREFIX}export.json"`），确认输出为 `schema 冲突: 0 个` 后再进入步骤 11——`apply_prefix` 的守卫只保证新名不撞本次 spec 内不改名的键，不代表 `export.json` 里没有别的 Controller 也用了这个新名，改名同样可能重新制造静默覆盖。
+- **确认覆盖**：原样进入步骤 11。通用包装/框架 schema（`R_*`、`Page_*`、`PageRequest`）撞名通常是同一模型（内容相同时覆盖是 no-op，检测脚本已据此降噪），应选此项；改名仅用于业务 DTO/VO 与静态内部类这类真正不同源的撞名。
 - **中止**：停止推送，不做任何远端写操作。
 
 标注「来源未知」的是远端存在但无接口引用的孤儿 schema，或缺 `x-source-controller` 的历史接口——无法证明同源，故从严计入冲突。
@@ -154,13 +160,15 @@ HTTP=$(curl -s -o "${TMPPREFIX}verify.json" -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
 if [ "$HTTP" = "200" ]; then
-  python3 "$SKILL_DIR/scripts/push_verify.py" "${TMPPREFIX}spec.json" "${TMPPREFIX}verify.json"
+  python3 "$SKILL_DIR/scripts/push_verify.py" "${TMPPREFIX}verify.json"
 else
   echo "⚠️ 回读请求失败（HTTP ${HTTP}），跳过比对——这不代表推送失败"
 fi
 ```
 
 `HTTP` 非 `200`（401/403 token 过期、5xx、限流等）**不得**执行 `push_verify.py`：错误响应体通常不含 `paths`/`components`，若仍照常比对，`isinstance` 防御性检查会把它们降级为空结构，导致本次推送的**每一个**接口和 schema 都被判定为「远端不存在」——把「回读请求本身失败」误报成「推送彻底失败」。此时步骤 12 报告必须明确标注**回读失败（非推送失败）**：推送结果以步骤 11.5 的 counters 为准，实际是否落地需人工到 `https://app.apifox.com/project/${PROJECT_ID}` 确认。
+
+`push_verify.py` 的校验基准是 `${TMPPREFIX}payload-update.json` / `${TMPPREFIX}payload-create.json` 中**本次实际提交**的接口，不是完整 spec——跳过(冲突)的接口从未进入任何 payload，不会被误判为不一致。两个文件都不存在（本次全部接口被跳过）时脚本会打印提示并以退出码 `0` 优雅退出，不比对任何内容，不属于「回读失败」也不属于「校验通过」，报告中应如实说明"本次无接口实际推送"。
 
 `HTTP` 为 `200` 时，退出码 `1` 才表示 `push_verify.py` 发现了真实不一致，**必须在步骤 12 报告中原样列出**，不得只报 counters。
 

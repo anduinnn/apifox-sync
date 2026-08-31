@@ -39,7 +39,7 @@ String code：
 ```json
 {
   "type": "string",
-  "enum": ["NONE", "SINGLE", "FLOAT", "FIXED"],
-  "description": "定位模式: NONE-无 SINGLE-单点 FLOAT-浮动解 FIXED-固定解"
+  "enum": ["PENDING", "APPROVED", "REJECTED"],
+  "description": "审核状态: PENDING-待审核 APPROVED-已通过 REJECTED-已驳回"
 }
 ```

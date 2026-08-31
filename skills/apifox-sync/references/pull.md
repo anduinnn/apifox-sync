@@ -3,6 +3,7 @@
 临时文件统一放 `.claude/.tmp/`。每次 Bash 调用开头：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh" ] || { echo "ERROR: 未初始化，请先执行步骤 1"; exit 1; }
 source "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh"
 ```
 
@@ -51,11 +52,17 @@ HTTP=$(curl -s -o "${TMPPREFIX}export.json" -w "%{http_code}" -X POST \
 
 ⚠️ **`includeApifoxExtensionProperties: true` 必需**。漏掉则导出不含 `x-source-method-fq` / `x-apifox-folder` / `x-source-controller`，`pull_extract.py` 精简扩展字段时拿不到锚点。
 
-`200` 写文件；`401/403` 读 `references/init.md` 重配后重试；其他中止。
+`curl -o` 不论状态码都会把响应体写进 `export.json`；非 `200` 时 `export.json` 内容为错误响应，不可继续——若不检查状态码就往下走，`list_folders.py` 对错误体输出为空会被误判为"项目中尚无接口"而中止，或者更糟：后续步骤继续拿错误响应当正常导出处理。**必须先检查状态码，非 200 直接中止**：
 
 ```bash
+if [ "$HTTP" != "200" ]; then
+  echo "❌ 导出失败（HTTP ${HTTP}），中止拉取"
+  exit 1
+fi
 python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
 ```
+`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 排查响应体后重试。
+
 stdout 每行一个 folder（按字典序；空行代表根目录）。空输出 → 提示"项目中尚无接口"，中止。
 
 ## 步骤 2.5：解析 pull 参数

@@ -73,3 +73,10 @@ p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', 'utf-8')
 ```
 
 提示：配置已保存到 `.claude/apifox.json`，建议加入 `.gitignore`（含 apiToken）。
+
+## 步骤 5：清理
+
+`init` 可能被单独调用（不接续 push/pull），步骤 1 写出的 `${TMPPREFIX}env.sh` 若不清理会留在用户项目的 `.claude/.tmp/` 目录里：
+```bash
+rm -f "${TMPPREFIX}"env.sh
+```

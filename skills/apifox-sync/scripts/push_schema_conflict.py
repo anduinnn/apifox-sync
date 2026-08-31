@@ -41,10 +41,13 @@ components.schemas，同名 schema 直接覆盖、没有任何提示。响应 VO
 Location/Detail/Item 这类通用名的静态内部类，schema 名会落成简单类名；若
 远端已有别的 Controller 建的同名 schema，会被静默覆盖，引用它的其他接口
 文档随之失真。检测模式：以 export.json 的 components.schemas 建图
-（schema → 它引用的 schema），从每个 operation 直接 $ref 出发做 BFS 传播
+（schema → 它引用的 schema），从每个 operation 直接 $ref 出发做 DFS 传播
 归属（传递闭包），据此判断本次 spec 会覆盖到哪些「非本次来源」的远端
-schema。改名模式：读取检测模式写下的 schema-conflicts.json，把其中列出的
-schema 键加前缀并同步重写 spec 内所有指向它们的 $ref，就地覆盖 spec_json。
+schema；其中内容与远端定义等价（忽略 Apifox 注入的 x-apifox-* 扩展字段）
+的一律跳过——覆盖是 no-op，典型场景是 R_String/Page_XxxVO 这类框架包装
+schema，天然被多个 Controller 共同引用，否则每次推送都会误报。改名模式：
+读取检测模式写下的 schema-conflicts.json，把其中列出的 schema 键加前缀并
+同步重写 spec 内所有指向它们的 $ref，就地覆盖 spec_json。
 
 退出码：
     0 成功（检测模式有无冲突都算成功执行，是否阻断由对话层决策）
@@ -63,6 +66,41 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from json_safe import load_json_loose  # noqa: E402
 from debug_log import debug_log  # noqa: E402
+
+
+def schemas_of(doc: dict) -> dict:
+    """安全取出 doc["components"]["schemas"]，非 dict 一律降级为空字典。
+
+    export.json / spec.json 均可能因上游异常而结构畸形（如 components 是
+    字符串、schemas 是列表），与 push_verify.py 对 remote 的归一化保持一致，
+    避免 AttributeError/TypeError 中断整个检测流程。
+    """
+    components = doc.get("components", {})
+    components = components if isinstance(components, dict) else {}
+    schemas = components.get("schemas", {})
+    return schemas if isinstance(schemas, dict) else {}
+
+
+def _strip_apifox_ext(node):
+    """递归剥离 Apifox 注入的 x-apifox-* 扩展字段（如属性顺序 x-apifox-orders）。
+
+    用于判断 schema 内容是否语义等价：远端导出的 schema 常带这类元数据，与
+    本地新生成的 spec 逐字节比较必然不等，但这些字段不影响 schema 语义。
+    """
+    if isinstance(node, dict):
+        return {
+            k: _strip_apifox_ext(v)
+            for k, v in node.items()
+            if not (isinstance(k, str) and k.startswith("x-apifox-"))
+        }
+    if isinstance(node, list):
+        return [_strip_apifox_ext(v) for v in node]
+    return node
+
+
+def schema_equivalent(a, b) -> bool:
+    """判断两份 schema 定义是否语义等价（忽略 Apifox 注入的扩展字段）。"""
+    return _strip_apifox_ext(a) == _strip_apifox_ext(b)
 
 
 def refs_of(node) -> set[str]:
@@ -87,7 +125,7 @@ def build_owners(export: dict) -> dict[str, set[str]]:
     仅被其他 schema 间接引用的 schema 也会被正确归属；无 x-source-controller
     的 operation 归属为空串（来源未知）。
     """
-    schemas = export.get("components", {}).get("schemas", {})
+    schemas = schemas_of(export)
     graph = {name: refs_of(body) for name, body in schemas.items()}
     owners: dict[str, set[str]] = {}
     paths = export.get("paths", {})
@@ -113,9 +151,16 @@ def build_owners(export: dict) -> dict[str, set[str]]:
 
 
 def find_conflicts(spec: dict, export: dict) -> list[dict]:
-    """本次 spec 中会覆盖到「非本次来源」的远端 schema，按名字典序返回。"""
-    export_schemas = set(export.get("components", {}).get("schemas", {}))
-    spec_schemas = set(spec.get("components", {}).get("schemas", {}))
+    """本次 spec 中会覆盖到「非本次来源」的远端 schema，按名字典序返回。
+
+    内容与远端定义等价（见 schema_equivalent）的一律跳过：覆盖是 no-op，
+    不构成真实冲突——典型场景是 R_String/Page_XxxVO 这类框架包装 schema，
+    天然被多个 Controller 共同引用，若不降噪则每次推送都会误报。
+    """
+    export_schemas_dict = schemas_of(export)
+    spec_schemas_dict = schemas_of(spec)
+    export_schemas = set(export_schemas_dict)
+    spec_schemas = set(spec_schemas_dict)
     mine: set[str] = set()
     paths = spec.get("paths", {})
     if isinstance(paths, dict):
@@ -130,8 +175,11 @@ def find_conflicts(spec: dict, export: dict) -> list[dict]:
     for name in sorted(spec_schemas & export_schemas):
         own = owners.get(name) or {""}   # 远端有但无人引用 → 孤儿，来源未知，从严计冲突
         foreign = own - mine
-        if foreign:
-            conflicts.append({"schema": name, "owners": sorted(foreign)})
+        if not foreign:
+            continue
+        if schema_equivalent(spec_schemas_dict[name], export_schemas_dict[name]):
+            continue
+        conflicts.append({"schema": name, "owners": sorted(foreign)})
     return conflicts
 
 
@@ -182,7 +230,7 @@ def apply_prefix(spec: dict, names: set[str], prefix: str) -> int:
     「两个不同旧名映射到同一新名」在当前构造下不可达；下面的重复目标检查留作
     防御性代码，不指望它会触发。
     """
-    schemas = spec.get("components", {}).get("schemas", {})
+    schemas = schemas_of(spec)
     mapping = {n: f"{prefix}{n}" for n in names if n in schemas}
     if not mapping:
         return 0
@@ -215,7 +263,7 @@ def run_apply(spec_path: str, prefix: str, tmpprefix: str) -> int:
     if n < 0:
         return 1
     with open(spec_path, "w", encoding="utf-8") as f:
-        json.dump(spec, f, ensure_ascii=False)
+        json.dump(spec, f, ensure_ascii=False, indent=2)
     print(f"已改名 {n} 个 schema（前缀 {prefix}）")
     for name in sorted(names):
         print(f"  · {name} → {prefix}{name}")
@@ -370,6 +418,65 @@ def self_test() -> int:
     props = spec6["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
     assert props["a"]["$ref"] == "#/components/schemas/XA", props["a"]
     assert props["xa"]["$ref"] == "#/components/schemas/XXA", props["xa"]
+
+    # I3(a) 降噪：foreign schema 内容与远端等价（仅差 Apifox 注入的
+    # x-apifox-* 元数据）时覆盖是 no-op，不应计入冲突——典型场景是
+    # R_String 这类被多个 Controller 共享的框架包装 schema。真正内容不同
+    # 的 foreign schema 必须仍然报冲突，否则会掩盖真实覆盖风险。
+    export_equiv = {
+        "paths": {
+            "/o": {"get": {"x-source-controller": "com.x.OrderController",
+                           "responses": {"200": {"content": {"application/json": {
+                               "schema": {"$ref": "#/components/schemas/R_String"}}}}}}},
+        },
+        "components": {"schemas": {
+            "R_String": {
+                "type": "object",
+                "properties": {"code": {"type": "integer"}, "data": {"type": "string"}},
+                "x-apifox-orders": ["code", "data"],   # 远端注入的排序元数据
+            },
+        }},
+    }
+    spec_equiv_same = {
+        "paths": {"/u": {"get": {"x-source-controller": "com.x.UserController"}}},
+        "components": {"schemas": {
+            # 语义与远端完全相同，仅缺少远端注入的 x-apifox-orders
+            "R_String": {
+                "type": "object",
+                "properties": {"code": {"type": "integer"}, "data": {"type": "string"}},
+            },
+        }},
+    }
+    assert find_conflicts(spec_equiv_same, export_equiv) == [], \
+        find_conflicts(spec_equiv_same, export_equiv)
+
+    spec_equiv_diff = {
+        "paths": {"/u": {"get": {"x-source-controller": "com.x.UserController"}}},
+        "components": {"schemas": {
+            # 内容真的不同（多一个字段），必须仍然报冲突
+            "R_String": {
+                "type": "object",
+                "properties": {"code": {"type": "integer"}, "data": {"type": "string"},
+                               "extra": {"type": "boolean"}},
+            },
+        }},
+    }
+    conflicts_diff = find_conflicts(spec_equiv_diff, export_equiv)
+    assert [c["schema"] for c in conflicts_diff] == ["R_String"], conflicts_diff
+
+    # 类型守卫一致性：components/schemas 非 dict（畸形导出/畸形 spec）时应
+    # 安全降级为空字典，而不是抛 AttributeError/TypeError 中断整个流程——
+    # 与 push_verify.py 对 remote 的归一化保持一致。
+    malformed_export = {"paths": {}, "components": "oops"}
+    assert schemas_of(malformed_export) == {}
+    assert build_owners(malformed_export) == {}, build_owners(malformed_export)
+
+    malformed_spec = {"paths": {}, "components": ["not", "a", "dict"]}
+    assert schemas_of(malformed_spec) == {}
+    assert find_conflicts(malformed_spec, export) == [], find_conflicts(malformed_spec, export)
+
+    malformed_spec_apply = {"components": "oops", "paths": {}}
+    assert apply_prefix(malformed_spec_apply, {"Anything"}, "X") == 0
 
     print("SELFTEST_OK")
     return 0
