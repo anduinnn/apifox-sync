@@ -134,7 +134,11 @@ def load_pushed_spec(tmpprefix: str) -> dict | None:
     （skip 的接口两者都不进，见模块 docstring）。两者的 "input" 字段是 JSON
     字符串形式的 spec，paths 为本批次子集，components 是完整本地 spec 的
     深拷贝（build_spec 对同一个 base spec 深拷贝，两批次的 components 内容
-    相同，取任一份即可）。合并两批次的 paths 即为本次实际推送的接口全集。
+    相同，取任一份即可）。逐 path 按 method 合并两批次的 paths 即为本次实际
+    推送的接口全集——**不可用 dict.update() 做顶层合并**：同一个 path 的不同
+    method 可能被拆到两个批次（如「已有 GET 走 update，新增 DELETE 走
+    create」），顶层 update() 会让后处理批次的同 path 条目整体覆盖前者，
+    导致先写入的方法从合并结果中消失。
 
     两个文件都不存在（本次全部接口被跳过，未发生任何实际推送）时返回 None，
     调用方应据此优雅退出，不得当作「无问题」直接判定校验通过。这两个文件是
@@ -153,7 +157,16 @@ def load_pushed_spec(tmpprefix: str) -> dict | None:
         batch_spec = json.loads(payload["input"])
         batch_paths = batch_spec.get("paths", {})
         if isinstance(batch_paths, dict):
-            paths.update(batch_paths)
+            # 逐 path 做方法级合并，不可用 paths.update(batch_paths)：后者是
+            # 顶层浅覆盖，若同一个 path 的不同 method 被拆到 update/create
+            # 两个批次（如「已有 GET 走 update，新增 DELETE 走 create」），
+            # 后处理的批次会把前一批次写入的整个 path 条目替换掉，导致先写
+            # 入的方法从校验范围静默消失。
+            for path_key, methods in batch_paths.items():
+                if isinstance(methods, dict):
+                    paths.setdefault(path_key, {}).update(methods)
+                else:
+                    paths[path_key] = methods
         batch_components = batch_spec.get("components", {})
         if isinstance(batch_components, dict):
             components = batch_components
@@ -318,6 +331,39 @@ def self_test() -> int:
         assert load_pushed_spec(empty_prefix) is None
         rc_empty = run(str(remote_path), empty_prefix)
         assert rc_empty == 0
+
+        # 10) I2 回归：同一个 path 的不同 method 被拆到 update/create 两个
+        #    批次时（如「已有 GET，新增 DELETE」——GET 锚点命中走 update，
+        #    DELETE 锚点未命中走 create），合并必须是逐 path 的方法级合并，
+        #    不能是 dict.update() 式的整个 path 顶层覆盖，否则先写入的方法
+        #    会被后写入批次的同 path 条目整体替换掉、静默从校验范围消失。
+        multi_prefix = str(tmp) + "/multi-"
+        multi_schemas = {"UserVO": {"type": "object"}}
+        update_multi_spec = {
+            "paths": {"/api/users/{id}": {"get": {
+                "x-apifox-folder": "用户管理",
+                "x-source-method-fq": "UserController#get",
+            }}},
+            "components": {"schemas": multi_schemas},
+        }
+        create_multi_spec = {
+            "paths": {"/api/users/{id}": {"delete": {
+                "x-apifox-folder": "用户管理",
+                "x-source-method-fq": "UserController#delete",
+            }}},
+            "components": {"schemas": multi_schemas},
+        }
+        Path(f"{multi_prefix}payload-update.json").write_text(
+            json.dumps({"input": json.dumps(update_multi_spec, ensure_ascii=False),
+                        "options": {}}, ensure_ascii=False), encoding="utf-8")
+        Path(f"{multi_prefix}payload-create.json").write_text(
+            json.dumps({"input": json.dumps(create_multi_spec, ensure_ascii=False),
+                        "options": {}}, ensure_ascii=False), encoding="utf-8")
+        pushed_multi = load_pushed_spec(multi_prefix)
+        methods = set(pushed_multi["paths"].get("/api/users/{id}", {}))
+        assert methods == {"get", "delete"}, (
+            "同 path 跨批次合并丢失方法（dict.update 整体覆盖 bug）: " + str(methods)
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
