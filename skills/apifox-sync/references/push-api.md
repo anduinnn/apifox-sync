@@ -142,6 +142,22 @@ done
 
 ## 步骤 12：报告与清理
 
+### 12.1 回读校验
+
+`import-openapi` 的 counters 只说明请求被接受，不能说明 folder 落对、schema 正确。推送后重新导出比对：
+
+```bash
+curl -s -o "${TMPPREFIX}verify.json" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}'
+python3 "$SKILL_DIR/scripts/push_verify.py" "${TMPPREFIX}spec.json" "${TMPPREFIX}verify.json"
+```
+
+退出码 `1` 表示存在不一致，**必须在步骤 12 报告中原样列出**，不得只报 counters。
+
 报告更新/新建/清理/跳过数量、目标文件夹、项目链接 `https://app.apifox.com/project/${PROJECT_ID}`。删除失败的旧接口单独列出提示手动清理。
 
 ```bash
@@ -151,5 +167,6 @@ rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json \
       "${TMPPREFIX}"rename-list.json "${TMPPREFIX}"rename-confirmed.json \
       "${TMPPREFIX}"del-response.out \
       "${TMPPREFIX}"schema-conflicts.json \
+      "${TMPPREFIX}"verify.json \
       "${TMPPREFIX}"env.sh "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```
