@@ -147,16 +147,22 @@ done
 `import-openapi` 的 counters 只说明请求被接受，不能说明 folder 落对、schema 正确。推送后重新导出比对：
 
 ```bash
-curl -s -o "${TMPPREFIX}verify.json" -X POST \
+HTTP=$(curl -s -o "${TMPPREFIX}verify.json" -w "%{http_code}" -X POST \
   "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "X-Apifox-Api-Version: 2024-03-28" \
   -H "Content-Type: application/json" \
-  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}'
-python3 "$SKILL_DIR/scripts/push_verify.py" "${TMPPREFIX}spec.json" "${TMPPREFIX}verify.json"
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
+if [ "$HTTP" = "200" ]; then
+  python3 "$SKILL_DIR/scripts/push_verify.py" "${TMPPREFIX}spec.json" "${TMPPREFIX}verify.json"
+else
+  echo "⚠️ 回读请求失败（HTTP ${HTTP}），跳过比对——这不代表推送失败"
+fi
 ```
 
-退出码 `1` 表示存在不一致，**必须在步骤 12 报告中原样列出**，不得只报 counters。
+`HTTP` 非 `200`（401/403 token 过期、5xx、限流等）**不得**执行 `push_verify.py`：错误响应体通常不含 `paths`/`components`，若仍照常比对，`isinstance` 防御性检查会把它们降级为空结构，导致本次推送的**每一个**接口和 schema 都被判定为「远端不存在」——把「回读请求本身失败」误报成「推送彻底失败」。此时步骤 12 报告必须明确标注**回读失败（非推送失败）**：推送结果以步骤 11.5 的 counters 为准，实际是否落地需人工到 `https://app.apifox.com/project/${PROJECT_ID}` 确认。
+
+`HTTP` 为 `200` 时，退出码 `1` 才表示 `push_verify.py` 发现了真实不一致，**必须在步骤 12 报告中原样列出**，不得只报 counters。
 
 报告更新/新建/清理/跳过数量、目标文件夹、项目链接 `https://app.apifox.com/project/${PROJECT_ID}`。删除失败的旧接口单独列出提示手动清理。
 
