@@ -31,8 +31,10 @@
   },
   "schemaNameRules": {
     "dto": "{ClassName}",
+    "staticInnerClass": "{OuterClass}{InnerClass}",
     "rWrapper": "R_{InnerType}",
-    "pageWrapper": "Page_{InnerType}"
+    "pageWrapper": "Page_{InnerType}",
+    "_note": "静态内部类必须带外层类名前缀。Location/Detail/Item 这类通用内部类名极易与其他模块的顶层类撞名，而 push 以 OVERWRITE_EXISTING 提交 schema"
   },
   "genericPlaceholderRules": {
     "_description": "模板中 <T> 占位符的替换规则",

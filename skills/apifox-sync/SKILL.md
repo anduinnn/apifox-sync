@@ -38,7 +38,7 @@ Apifox 接口同步工具，支持双向操作：
 |------|---------|------|
 | 1-5 | `references/push-parse.md` | 解析参数、加载配置、读取 Controller、定位方法、提取接口信息 |
 | 6 | `references/type-resolution.md` | 递归展开 DTO/VO 类型，两级降级定位 |
-| 7 | `references/enum-detection.md` | Integer 字段匹配枚举，提取 code+desc |
+| 7 | `references/enum-detection.md` | Integer/String 字段匹配枚举，提取 code+desc |
 | 8 | `references/push-api.md` 步骤 8 | export-openapi 获取文件夹，AskUserQuestion 选目标 |
 | 9 | `references/openapi-gen.md` | 组装 OpenAPI 3.0 JSON，写入 spec |
 | 10 | `references/push-api.md` 步骤 10 | JSON 预验证 |
