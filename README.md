@@ -8,7 +8,7 @@ Claude Code 插件：Apifox 接口同步工具，支持双向操作。
 
 - 解析 Spring Boot Controller 源码，自动生成 OpenAPI 3.0 spec
 - 支持递归展开 DTO/VO/Entity 类型
-- 自动识别枚举字段
+- 自动识别枚举字段（code 支持 `Integer` 和 `String` 两种类型，v1.7.0+）
 - 推送到 Apifox 指定项目和文件夹
 
 ### Pull — 从 Apifox 拉取接口定义
@@ -95,6 +95,24 @@ pull 时会先扫描本地 `.claude/apis/`（新接口级布局优先，未命�
 
 提供「全部覆盖 / 逐目录选择 / 取消」三种处理方式，不会再静默覆盖本地文件。选中对应 folder 时会自动迁移老版本的 `<folder>.json` 聚合文件到新的接口级布局。
 
+### schema 命名冲突预检（v1.7.0+）
+
+push 以 `OVERWRITE_EXISTING` 提交 `components.schemas`，同名 schema 会被直接覆盖且没有任何提示。推送前会先比对本次生成的 schema 名是否已被「非本次来源」的 Controller 占用（按引用来源归属计算传递闭包），命中时列出冲突清单（schema 名 + 占用方 Controller），三选一：
+
+- **加前缀改名**：前缀取本次 Controller 简单类名（去掉 `Controller` 后缀），自动重写 spec 中的冲突 schema 及其引用
+- **确认覆盖**：确认是同一个模型时，原样推送
+- **中止**：不做任何远端写操作
+
+避免不同模块的同名 DTO/VO（如两个 `PageQuery`）互相覆盖导致 schema 字段被悄悄改掉。
+
+### 静态内部类 schema 命名（v1.7.0+）
+
+Controller 引用的静态内部类展开为 schema 时，命名规则由简单类名改为 `{外部类名}{内部类名}`（如 `DeviceVO` 的内部类 `Location` → `DeviceVOLocation`），避免 `Location`/`Detail`/`Item` 这类通用内部类名与其他模块的顶层类撞名。**升级注意事项见下方「注意事项」章节。**
+
+### 推送后回读校验（v1.7.0+）
+
+`import-openapi` 返回的 counters（如 `endpointCreated`）只说明请求被 Apifox 接受，不能证明 folder 落对了、schema 字段落全了、`x-source-method-fq` 锚点写进去了。推送完成后会立即重新 export 一次远端数据，核对本次推送的接口在 folder 归属、锚点、schema 字段三方面是否与本地生成的 spec 完全一致，不一致会明确报错并列出差异，而不是让「counters 正常」掩盖实际未生效的写入。
+
 ## 注意事项
 
 **同 path+method 跨文件夹的限制**：Apifox 允许同一个 path+method（如 `POST /api/users`）存在于不同文件夹中，但 OpenAPI 规范以 path+method 为唯一键，导出时只会保留其中一个。这会影响：
@@ -103,3 +121,5 @@ pull 时会先扫描本地 `.claude/apis/`（新接口级布局优先，未命�
 - **pull**：跨文件夹的重复接口只会被拉取到其中一个文件夹的文件中，其他文件夹会丢失该接口
 
 建议避免在不同文件夹中创建相同 path+method 的接口。
+
+**⚠️ 静态内部类改名产生的孤儿 schema（升级到 v1.7.0 必读）**：v1.7.0 起，静态内部类 schema 由简单类名改为 `{外部类名}{内部类名}`（见上方「关键能力」）。已经 push 过的项目升级后再次 push，内部类会以新名称建立 schema，旧的简单类名 schema 不会被联动删除，会成为孤儿留在 Apifox 中。孤儿 schema 不影响新推送的接口文档，但仍占用项目空间，且旧名可能仍被其他 Controller 的接口引用（若那些 Controller 还未一起重推）。**本工具不会自动删除旧 schema**——删除操作不可逆，需要你确认没有接口依赖后手动在 Apifox 中清理。

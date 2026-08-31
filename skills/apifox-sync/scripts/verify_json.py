@@ -12,9 +12,9 @@
 参数错误：stderr 输出用法提示，退出码 2。
 
 抽出目的：替换 push-api.md 步骤 10 内联的 `python3 -c "..."`，让调用
-形态统一为固定脚本路径，使白名单规则
-`Bash(python3 skills/apifox-sync/scripts/verify_json.py:*)` 能一次命中，
-避免每次授权。
+形态统一为固定脚本路径 `$SKILL_DIR/scripts/verify_json.py`（而非每次
+临时拼接的 `-c` 字符串），便于用户在本地 Bash 白名单里为这一固定
+调用形态配置规则，避免每次都要单独授权。
 """
 from __future__ import annotations
 

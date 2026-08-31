@@ -8,7 +8,7 @@
 
 **第一级**：从项目根目录 Glob 搜索 `**/{ClassName}.java`（覆盖所有子模块）。多结果时优先 import 语句包名匹配的文件。
 
-**静态内部类**：Glob 返回 0 结果时，先在已读文件中搜索 `static class {ClassName}`，再用 Grep 搜 `class {ClassName}` 定位外部类文件。
+**静态内部类**：Glob 返回 0 结果时，先在已读文件中搜索 `static class {ClassName}`，再用 Grep 搜 `class {ClassName}` 定位外部类文件。**schema 名必须为 `{外部类名}{内部类名}`**（如 `DeviceVO` 的内部类 `Location` → `DeviceVOLocation`），不可用简单类名——`Location`/`Detail`/`Item` 这类通用名极易与其他模块的顶层类撞名。
 
 **第二级降级**：仍未找到 → 映射为 `{type:object, additionalProperties:true}`，继续处理，不中断流程。
 

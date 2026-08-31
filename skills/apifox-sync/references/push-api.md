@@ -1,11 +1,10 @@
-# Push 步骤 8、10-12：文件夹选择、验证、推送、报告
+# Push 步骤 8、10-12（含 10.5）：文件夹选择、验证、schema 冲突预检、推送、报告
 
 临时文件统一放 `.claude/.tmp/`。每次 Bash 调用开头：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
-export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
-[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh" ] && source "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
+[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh" ] || { echo "ERROR: 未初始化，请先执行步骤 2"; exit 1; }
+source "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh"
 ```
 
 **Debug 模式**：debug 环境变量由 preamble 自动从 env 文件恢复。当 `APIFOX_DEBUG=1` 时，curl 调用前后通过 `debug_log.py --format-entry` 记录日志：
@@ -17,7 +16,7 @@ fi
 if [ "$APIFOX_DEBUG" = "1" ]; then
   _end=$(python3 -c "import time; print(int(time.time()*1000))")
   _dur=$((_end - _start))
-  python3 skills/apifox-sync/scripts/debug_log.py --format-entry \
+  python3 "$SKILL_DIR/scripts/debug_log.py" --format-entry \
     --session-id "$APIFOX_SESSION_ID" --step "push.<step_name>" \
     --status "success" --duration-ms "$_dur" --http-status "$_http_code" \
     --command "curl *** <url>" >> "$APIFOX_DEBUG_LOG"
@@ -29,11 +28,34 @@ fi
 
 **必须在步骤 9 之前执行**，spec 的 `x-apifox-folder` 需用户选择的路径。
 
-调用 export-openapi 获取全量数据 → 写入 `${TMPPREFIX}export.json`（`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 中止）：
 ```bash
-python3 skills/apifox-sync/scripts/list_folders.py "${TMPPREFIX}export.json"
+HTTP=$(curl -s -o "${TMPPREFIX}export.json" -w "%{http_code}" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
 ```
-stdout 每行一个 folder（按字典序；空行代表根目录）。`AskUserQuestion` 选目标：现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建"再问路径。空输出 → 直接问根目录或新建。结果保存为 `TARGET_FOLDER` 传给步骤 9。
+
+⚠️ **`includeApifoxExtensionProperties: true` 必需**。漏掉则导出不含 `x-source-method-fq` / `x-apifox-folder` / `x-source-controller`，`push_index.py` 建出空索引，`push_classify.py` 会把**全部接口判为 create** 导致重复创建——且 counters 表面正常，故障完全静默。
+
+`curl -o` 不论状态码都会把响应体写进 `export.json`；非 `200` 时它是 Apifox 错误 JSON。步骤 10.5 的冲突预检以这份文件为唯一输入，若不检查状态码就继续，`list_folders.py` 对错误体输出为空会被误判为"项目中尚无接口"而放行推送，最终导致上一段所述的同一条故障链（空索引 → 全部判 create → 重复创建）——**必须先检查状态码，非 200 直接中止，不得继续到 `list_folders.py`**：
+
+```bash
+if [ "$HTTP" != "200" ]; then
+  echo "❌ 导出失败（HTTP ${HTTP}），中止推送"
+  exit 1
+fi
+python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
+python3 "$SKILL_DIR/scripts/suggest_folder.py" "${TMPPREFIX}export.json" "<步骤3的全限定类名>"
+```
+`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 排查响应体后重试。
+
+第一条 stdout 每行一个 folder（按字典序；空行代表根目录）；第二条输出该 Controller 上次推送的 folder（可能为空）。
+
+`AskUserQuestion` 选目标：**若 `suggest_folder.py` 有输出，把首行作为第一个选项并标注「当前 Controller 上次推送位置」**，其后接其余现有文件夹 + "新建（输入路径）" + "项目根目录"。"新建"再问路径。空输出 → 直接问根目录或新建。结果保存为 `TARGET_FOLDER` 传给步骤 9。
+
+**仍须询问**，不因有推荐就自动选定：选错目录代价高且事后难清理。
 
 ## 步骤 10：JSON 预验证
 
@@ -42,23 +64,45 @@ stdout 每行一个 folder（按字典序；空行代表根目录）。`AskUserQ
 cat > "${TMPPREFIX}spec.json" << 'SPECEOF'
 {生成的 JSON}
 SPECEOF
-python3 skills/apifox-sync/scripts/verify_json.py "${TMPPREFIX}spec.json"
+python3 "$SKILL_DIR/scripts/verify_json.py" "${TMPPREFIX}spec.json"
 ```
 失败 → 按 line/col/msg 定位修复（未转义引号、尾逗号、注释），最多 3 次。
+
+## 步骤 10.5：schema 命名冲突预检
+
+**必须在步骤 11 任何写操作之前**。push 以 `OVERWRITE_EXISTING` 提交 schema，同名即覆盖且无提示。
+
+```bash
+python3 "$SKILL_DIR/scripts/push_schema_conflict.py" "${TMPPREFIX}spec.json" "${TMPPREFIX}export.json"
+```
+
+输出 `schema 冲突: 0 个` → 直接进入步骤 11。
+
+否则用 `AskUserQuestion` 展示冲突清单（schema 名 + 占用方 Controller），三选一：
+
+- **自动加前缀改名**：前缀取本次 Controller 简单类名去掉 `Controller` 后缀
+  ```bash
+  python3 "$SKILL_DIR/scripts/push_schema_conflict.py" "${TMPPREFIX}spec.json" --apply-prefix "<前缀>"
+  ```
+  改名后**必须重跑步骤 10 的 `verify_json.py`** 确认 spec 仍合法，**并重跑本步骤开头的检测命令**（`push_schema_conflict.py "${TMPPREFIX}spec.json" "${TMPPREFIX}export.json"`），确认输出为 `schema 冲突: 0 个` 后再进入步骤 11——`apply_prefix` 的守卫只保证新名不撞本次 spec 内不改名的键，不代表 `export.json` 里没有别的 Controller 也用了这个新名，改名同样可能重新制造静默覆盖。
+- **确认覆盖**：原样进入步骤 11。通用包装/框架 schema（`R_*`、`Page_*`、`PageRequest`）撞名通常是同一模型（内容相同时覆盖是 no-op，检测脚本已据此降噪），应选此项；改名仅用于业务 DTO/VO 与静态内部类这类真正不同源的撞名。
+- **中止**：停止推送，不做任何远端写操作。
+
+标注「来源未知」的是远端存在但无接口引用的孤儿 schema，或缺 `x-source-controller` 的历史接口——无法证明同源，故从严计入冲突。
 
 ## 步骤 11：推送到 Apifox
 
 ### 11.1 构建双向索引
 
 ```bash
-python3 skills/apifox-sync/scripts/push_index.py "${TMPPREFIX}export.json"
+python3 "$SKILL_DIR/scripts/push_index.py" "${TMPPREFIX}export.json"
 ```
 写 `existing.json`（`METHOD:path` → folders）和 `by-source.json`（`x-source-method-fq` → 接口元数据）。
 
 ### 11.2 分类并生成 payload
 
 ```bash
-python3 skills/apifox-sync/scripts/push_classify.py "${TMPPREFIX}spec.json"
+python3 "$SKILL_DIR/scripts/push_classify.py" "${TMPPREFIX}spec.json"
 ```
 四类：**update**（锚点命中 & path+method 同）→ `AUTO_MERGE`；**rename**（锚点命中 & path/method 变）→ 死接口清单；**create**（锚点未命中 & 无冲突）→ `CREATE_NEW`；**skip**（跨文件夹冲突）。按需写 `payload-update.json`/`payload-create.json`/`rename-list.json`，打印摘要。
 
@@ -83,7 +127,7 @@ if [ -f "${TMPPREFIX}rename-confirmed.json" ]; then
       "https://api.apifox.com/v1/projects/${PROJECT_ID}/http-apis/${api_id}" \
       -H "Authorization: Bearer ${TOKEN}" -H "X-Apifox-Api-Version: 2024-03-28")
     echo "DELETE ${label} -> HTTP ${R}"
-  done < <(python3 skills/apifox-sync/scripts/push_delete_list.py)
+  done < <(python3 "$SKILL_DIR/scripts/push_delete_list.py")
 fi
 ```
 
@@ -104,6 +148,30 @@ done
 
 ## 步骤 12：报告与清理
 
+### 12.1 回读校验
+
+`import-openapi` 的 counters 只说明请求被接受，不能说明 folder 落对、schema 正确。推送后重新导出比对：
+
+```bash
+HTTP=$(curl -s -o "${TMPPREFIX}verify.json" -w "%{http_code}" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
+if [ "$HTTP" = "200" ]; then
+  python3 "$SKILL_DIR/scripts/push_verify.py" "${TMPPREFIX}verify.json"
+else
+  echo "⚠️ 回读请求失败（HTTP ${HTTP}），跳过比对——这不代表推送失败"
+fi
+```
+
+`HTTP` 非 `200`（401/403 token 过期、5xx、限流等）**不得**执行 `push_verify.py`：错误响应体通常不含 `paths`/`components`，若仍照常比对，`isinstance` 防御性检查会把它们降级为空结构，导致本次推送的**每一个**接口和 schema 都被判定为「远端不存在」——把「回读请求本身失败」误报成「推送彻底失败」。此时步骤 12 报告必须明确标注**回读失败（非推送失败）**：推送结果以步骤 11.5 的 counters 为准，实际是否落地需人工到 `https://app.apifox.com/project/${PROJECT_ID}` 确认。
+
+`push_verify.py` 的校验基准是 `${TMPPREFIX}payload-update.json` / `${TMPPREFIX}payload-create.json` 中**本次实际提交**的接口，不是完整 spec——跳过(冲突)的接口从未进入任何 payload，不会被误判为不一致。两个文件都不存在（本次全部接口被跳过）时脚本会打印提示并以退出码 `0` 优雅退出，不比对任何内容，不属于「回读失败」也不属于「校验通过」，报告中应如实说明"本次无接口实际推送"。
+
+`HTTP` 为 `200` 时，退出码 `1` 才表示 `push_verify.py` 发现了真实不一致，**必须在步骤 12 报告中原样列出**，不得只报 counters。
+
 报告更新/新建/清理/跳过数量、目标文件夹、项目链接 `https://app.apifox.com/project/${PROJECT_ID}`。删除失败的旧接口单独列出提示手动清理。
 
 ```bash
@@ -112,5 +180,7 @@ rm -f "${TMPPREFIX}"spec.json "${TMPPREFIX}"export.json \
       "${TMPPREFIX}"payload-update.json "${TMPPREFIX}"payload-create.json \
       "${TMPPREFIX}"rename-list.json "${TMPPREFIX}"rename-confirmed.json \
       "${TMPPREFIX}"del-response.out \
-      "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
+      "${TMPPREFIX}"schema-conflicts.json \
+      "${TMPPREFIX}"verify.json \
+      "${TMPPREFIX}"env.sh "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 ```

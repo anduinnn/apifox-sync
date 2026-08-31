@@ -1,6 +1,6 @@
 # Push 步骤 7：枚举识别
 
-对步骤 6 中提取的 **Integer 类型字段**，尝试识别关联枚举。
+对步骤 6 中提取的 **Integer / String 类型标量字段**，尝试识别关联枚举。
 
 ## 7.1 优先级 1：类内直接引用
 
@@ -17,13 +17,29 @@
 
 ## 7.3 读取枚举值
 
-提取常量格式 `CONSTANT_NAME(code, "desc", ...)`，只取第一个 Integer 参数为 code，第一个 String 参数为 desc。
+提取常量格式 `CONSTANT_NAME(code, "desc", ...)`：
 
-在 OpenAPI schema 中表示：
+- **code**：取第一个标量参数（Integer 或 String）
+- **desc**：取 code 之后的第一个 String 参数
+
+  当 code 本身是 String 时（形如 `NONE("NONE", "无")`），第一个 String 作 code，**第二个** String 作 desc。
+
+schema 中按 code 的**实际类型**生成。
+
+Integer code：
 ```json
 {
   "type": "integer",
   "enum": [1, 2, 3],
   "description": "航线类型: 1-航点航线 2-块状航线 3-仿地航线"
+}
+```
+
+String code：
+```json
+{
+  "type": "string",
+  "enum": ["PENDING", "APPROVED", "REJECTED"],
+  "description": "审核状态: PENDING-待审核 APPROVED-已通过 REJECTED-已驳回"
 }
 ```

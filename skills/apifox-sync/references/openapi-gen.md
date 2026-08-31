@@ -29,6 +29,7 @@
 
 参考 `data/framework-schemas.json` 的 `schemaNameRules` 和 `schemaNameSanitization`：
 - DTO 用类名；R 包装用 `R_{InnerType}`；Page 包装用 `Page_{InnerType}`
+- **静态内部类用 `{OuterClass}{InnerClass}`**（如 `DeviceVOLocation`），不用简单类名
 - 泛型字符 `<>`、`,`、空格 替换为 `_`，多个连续 `_` 合并（如 `R<Map<String,List<XxxVO>>>` → `R_Map_String_List_XxxVO`）
 - 同一个类只定义一次 schema，多处通过 `$ref: "#/components/schemas/{Name}"` 引用
 

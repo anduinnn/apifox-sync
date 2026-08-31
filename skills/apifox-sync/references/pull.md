@@ -3,32 +3,66 @@
 临时文件统一放 `.claude/.tmp/`。每次 Bash 调用开头：
 ```bash
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
-export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
-[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh" ] && source "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
+[ -f "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh" ] || { echo "ERROR: 未初始化，请先执行步骤 1"; exit 1; }
+source "${PROJECT_ROOT}/.claude/.tmp/apifox-sync-env.sh"
 ```
 
 ## 步骤 1：加载配置
 
+首次调用需完整 bootstrap 解析 `SKILL_DIR` 并写出 `env.sh`（后续调用直接用上方 preamble `source`）：
 ```bash
-eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
+export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
+SKILL_DIR=""
+for c in "${CLAUDE_PLUGIN_ROOT}/skills/apifox-sync" "${CLAUDE_PLUGIN_ROOT}" \
+         "$(python3 -c 'import json,pathlib;d=json.loads((pathlib.Path.home()/".claude/plugins/installed_plugins.json").read_text("utf-8"));print(next((e[0]["installPath"] for k,e in d.get("plugins",{}).items() if k.split("@")[0]=="apifox-sync" and e),""))' 2>/dev/null)/skills/apifox-sync" \
+         "$PROJECT_ROOT/skills/apifox-sync"; do
+  [ -f "$c/scripts/load_config.py" ] && SKILL_DIR="$c" && break
+done
+[ -z "$SKILL_DIR" ] && echo "ERROR: 无法定位 apifox-sync skill 目录" && exit 1
+cat > "${TMPPREFIX}env.sh" <<EOF
+export SKILL_DIR="$SKILL_DIR"
+export PROJECT_ROOT="$PROJECT_ROOT"
+export TMPPREFIX="$TMPPREFIX"
+eval "\$(python3 "\$SKILL_DIR/scripts/load_config.py" "\$PROJECT_ROOT")"
+export PROJECT_ID="\${APIFOX_PROJECT_ID:-\$PID}"
+export TOKEN PID PROJECT_ID APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
+EOF
+source "${TMPPREFIX}env.sh"
 ```
-
-**Debug 模式传递**：`load_config.py` 会输出 `APIFOX_DEBUG=0|1`。当 `APIFOX_DEBUG=1` 时，还会输出 `APIFOX_DEBUG_LOG` 和 `APIFOX_SESSION_ID`。eval 后这些变量即可用。在首次 eval 后设置 trap 以确保流程结束时（无论成功或失败）输出执行摘要：
+`source` 后 `SKILL_DIR`、`TOKEN`、`PID`、`HAS_TOKEN`、`PROJECT_ID`、`APIFOX_DEBUG`（`APIFOX_DEBUG=1` 时还有 `APIFOX_DEBUG_LOG`、`APIFOX_SESSION_ID`）等变量直接可用，后续 Bash 调用只需上方 preamble `source "${TMPPREFIX}env.sh"` 即可恢复全部变量。**Debug 模式**：在本步骤设置 trap 以确保流程结束时（无论成功或失败）输出执行摘要：
 ```bash
 if [ "$APIFOX_DEBUG" = "1" ]; then
-  export APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
-  trap 'python3 skills/apifox-sync/scripts/debug_log.py --summary "$APIFOX_DEBUG_LOG"' EXIT
+  trap 'python3 "$SKILL_DIR/scripts/debug_log.py" --summary "$APIFOX_DEBUG_LOG"' EXIT
 fi
 ```
-eval 后 `TOKEN`、`PID`、`HAS_TOKEN` 等变量直接可用；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。`HAS_TOKEN=no` 或 `PID` 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
+`HAS_TOKEN=no` 或 `PID` 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
 
 ## 步骤 2：获取目录结构
 
-调用 export-openapi 获取全量数据 → 写入 `${TMPPREFIX}export.json`（`200` 写文件；`401/403` 读 `references/init.md` 重配后重试；其他中止）：
 ```bash
-python3 skills/apifox-sync/scripts/list_folders.py "${TMPPREFIX}export.json"
+HTTP=$(curl -s -o "${TMPPREFIX}export.json" -w "%{http_code}" -X POST \
+  "https://api.apifox.com/v1/projects/${PROJECT_ID}/export-openapi" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Apifox-Api-Version: 2024-03-28" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"ALL"},"options":{"includeApifoxExtensionProperties":true,"addFoldersToTags":true},"oasVersion":"3.0","exportFormat":"JSON"}')
 ```
+
+⚠️ **`includeApifoxExtensionProperties: true` 必需**。漏掉则导出不含 `x-source-method-fq` / `x-apifox-folder` / `x-source-controller`，`pull_extract.py` 精简扩展字段时拿不到锚点。
+
+`curl -o` 不论状态码都会把响应体写进 `export.json`；非 `200` 时 `export.json` 内容为错误响应，不可继续——若不检查状态码就往下走，`list_folders.py` 对错误体输出为空会被误判为"项目中尚无接口"而中止，或者更糟：后续步骤继续拿错误响应当正常导出处理。**必须先检查状态码，非 200 直接中止**：
+
+```bash
+if [ "$HTTP" != "200" ]; then
+  echo "❌ 导出失败（HTTP ${HTTP}），中止拉取"
+  exit 1
+fi
+python3 "$SKILL_DIR/scripts/list_folders.py" "${TMPPREFIX}export.json"
+```
+`401/403` → 读 `references/init.md` 重配后重试；其他非 200 → 排查响应体后重试。
+
 stdout 每行一个 folder（按字典序；空行代表根目录）。空输出 → 提示"项目中尚无接口"，中止。
 
 ## 步骤 2.5：解析 pull 参数
@@ -36,13 +70,13 @@ stdout 每行一个 folder（按字典序；空行代表根目录）。空输出
 从 `{{ARGUMENTS}}` 中去掉 `pull` 后，将剩余参数传入 `detect_mode.py`，由脚本自动完成匹配：
 
 ```bash
-DETECT_RESULT=$(python3 skills/apifox-sync/scripts/detect_mode.py \
+DETECT_RESULT=$(python3 "$SKILL_DIR/scripts/detect_mode.py" \
   "${TMPPREFIX}export.json" "用户参数")
 ```
 
 无参数时省略第二个 argv：
 ```bash
-DETECT_RESULT=$(python3 skills/apifox-sync/scripts/detect_mode.py \
+DETECT_RESULT=$(python3 "$SKILL_DIR/scripts/detect_mode.py" \
   "${TMPPREFIX}export.json")
 ```
 
@@ -88,7 +122,7 @@ FEOF
 
 `pull_extract.py` 完成：按 `x-apifox-folder` 分组（精确 + 前缀匹配）→ 每个接口单独切片 → 递归收集引用的 schema → 精简扩展字段 → 写 `${TMPPREFIX}pull-op-<hash>.json`。
 ```bash
-python3 skills/apifox-sync/scripts/pull_extract.py \
+python3 "$SKILL_DIR/scripts/pull_extract.py" \
   --folders-file "${TMPPREFIX}folders.json" \
   "${TMPPREFIX}export.json"
 ```
@@ -103,13 +137,13 @@ stdout 结尾 `TOTAL: N 个接口分布在 K 个 folder`。
 ## 步骤 5.5：本地/远程 diff 预览
 
 ```bash
-python3 skills/apifox-sync/scripts/pull_diff.py "$PROJECT_ROOT"
+python3 "$SKILL_DIR/scripts/pull_diff.py" "$PROJECT_ROOT"
 ```
 本地 ↔ 远端按 `(METHOD, path)` 对齐（不依赖文件名）；v1.2 旧聚合文件自动展开。stdout 打印 `[NEW]/[SAME]/[DIFF]` 摘要 + 每 folder 目标结构预览。写 `${TMPPREFIX}pull-diff.json`（含 `new/updated/unchanged/removed/target_layout/legacy_file`）。
 
 **直接模式**（`PULL_MODE=folder`）：跳过询问，自动全量 approve：
 ```bash
-python3 skills/apifox-sync/scripts/pull_approve_all.py
+python3 "$SKILL_DIR/scripts/pull_approve_all.py"
 ```
 
 **接口模式**（`PULL_MODE=api`）：跳过询问，遍历步骤 4 生成的所有 `${TMPPREFIX}pull-op-*.json` 切片，读取每个切片内部 operation 的 `summary`，筛选出 summary 包含 `PULL_API_NAME` 关键词的接口（若由关键词搜索进入则使用步骤 2.5 已匹配的结果），自动写 API 模式 approved：
@@ -124,7 +158,7 @@ APEOF
 若无匹配接口，列出所有可用接口供参考，中止。
 
 **交互模式**（`PULL_MODE=interactive`）：`AskUserQuestion` 询问：
-- **全部覆盖**（推荐）→ `python3 skills/apifox-sync/scripts/pull_approve_all.py`
+- **全部覆盖**（推荐）→ `python3 "$SKILL_DIR/scripts/pull_approve_all.py"`
 - **逐接口选择** → 按下方「逐接口选择流程」处理
 - **取消** → 删除临时文件，中止
 
@@ -152,7 +186,7 @@ APEOF
 ## 步骤 6：保存文件
 
 ```bash
-python3 skills/apifox-sync/scripts/pull_save.py "$PROJECT_ROOT"
+python3 "$SKILL_DIR/scripts/pull_save.py" "$PROJECT_ROOT"
 ```
 按 approved 清单落盘：v1.2 旧文件迁移 + `(METHOD,path)` 索引匹配 + 删除远端已不存在的本地接口；未 approve 的 folder 删除临时切片。stdout 按行打印 `SAVED:/REMOVED:/MIGRATED:/SKIP:`。
 
@@ -163,6 +197,6 @@ python3 skills/apifox-sync/scripts/pull_save.py "$PROJECT_ROOT"
 rm -f "${TMPPREFIX}export.json" "${TMPPREFIX}pull-diff.json" \
       "${TMPPREFIX}pull-approved.json" "${TMPPREFIX}folders.json" \
       "${TMPPREFIX}existing.json" "${TMPPREFIX}by-source.json" \
-      "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
+      "${TMPPREFIX}"env.sh "${PROJECT_ROOT}/.claude/.tmp/apifox-debug-env.sh"
 find "${PROJECT_ROOT}/.claude/.tmp" -maxdepth 1 -name "apifox-sync-pull-op-*.json" -delete 2>/dev/null
 ```

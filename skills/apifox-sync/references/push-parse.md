@@ -14,15 +14,29 @@
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 mkdir -p "${PROJECT_ROOT}/.claude/.tmp"
 export TMPPREFIX="${PROJECT_ROOT}/.claude/.tmp/apifox-sync-"
-eval "$(python3 skills/apifox-sync/scripts/load_config.py "$PROJECT_ROOT")"
+SKILL_DIR=""
+for c in "${CLAUDE_PLUGIN_ROOT}/skills/apifox-sync" "${CLAUDE_PLUGIN_ROOT}" \
+         "$(python3 -c 'import json,pathlib;d=json.loads((pathlib.Path.home()/".claude/plugins/installed_plugins.json").read_text("utf-8"));print(next((e[0]["installPath"] for k,e in d.get("plugins",{}).items() if k.split("@")[0]=="apifox-sync" and e),""))' 2>/dev/null)/skills/apifox-sync" \
+         "$PROJECT_ROOT/skills/apifox-sync"; do
+  [ -f "$c/scripts/load_config.py" ] && SKILL_DIR="$c" && break
+done
+[ -z "$SKILL_DIR" ] && echo "ERROR: 无法定位 apifox-sync skill 目录" && exit 1
+cat > "${TMPPREFIX}env.sh" <<EOF
+export SKILL_DIR="$SKILL_DIR"
+export PROJECT_ROOT="$PROJECT_ROOT"
+export TMPPREFIX="$TMPPREFIX"
+eval "\$(python3 "\$SKILL_DIR/scripts/load_config.py" "\$PROJECT_ROOT")"
+export PROJECT_ID="\${APIFOX_PROJECT_ID:-\$PID}"
+export TOKEN PID PROJECT_ID APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
+EOF
+source "${TMPPREFIX}env.sh"
 ```
-eval 后 `TOKEN`、`PID`、`HAS_TOKEN` 等变量直接可用；`PROJECT_ID="${APIFOX_PROJECT_ID:-$PID}"`。`HAS_TOKEN=no` 或 `PID` 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
+`source` 后 `SKILL_DIR`、`TOKEN`、`PID`、`HAS_TOKEN`、`PROJECT_ID` 等变量直接可用。`HAS_TOKEN=no` 或 `PID` 为空时，自动读 `references/init.md` 步骤 2-4 重配后继续。
 
-**Debug 模式传递**：eval 后 `APIFOX_DEBUG` 变量即可用。当 `APIFOX_DEBUG=1` 时，设置 trap 输出执行摘要：
+**Debug 模式传递**：`APIFOX_DEBUG` 变量随 env.sh 一并可用。当 `APIFOX_DEBUG=1` 时，设置 trap 输出执行摘要：
 ```bash
 if [ "$APIFOX_DEBUG" = "1" ]; then
-  export APIFOX_DEBUG APIFOX_DEBUG_LOG APIFOX_SESSION_ID
-  trap 'python3 skills/apifox-sync/scripts/debug_log.py --summary "$APIFOX_DEBUG_LOG"' EXIT
+  trap 'python3 "$SKILL_DIR/scripts/debug_log.py" --summary "$APIFOX_DEBUG_LOG"' EXIT
 fi
 ```
 

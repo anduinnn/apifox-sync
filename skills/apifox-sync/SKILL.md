@@ -38,10 +38,12 @@ Apifox 接口同步工具，支持双向操作：
 |------|---------|------|
 | 1-5 | `references/push-parse.md` | 解析参数、加载配置、读取 Controller、定位方法、提取接口信息 |
 | 6 | `references/type-resolution.md` | 递归展开 DTO/VO 类型，两级降级定位 |
-| 7 | `references/enum-detection.md` | Integer 字段匹配枚举，提取 code+desc |
+| 7 | `references/enum-detection.md` | Integer/String 字段匹配枚举，提取 code+desc |
 | 8 | `references/push-api.md` 步骤 8 | export-openapi 获取文件夹，AskUserQuestion 选目标 |
 | 9 | `references/openapi-gen.md` | 组装 OpenAPI 3.0 JSON，写入 spec |
-| 10-12 | `references/push-api.md` 步骤 10-12 | JSON 预验证、分类推送（锚点匹配/死接口清理/import）、报告 |
+| 10 | `references/push-api.md` 步骤 10 | JSON 预验证 |
+| 10.5 | `references/push-api.md` 步骤 10.5 | schema 命名冲突预检，冲突时交互决策 |
+| 11-12 | `references/push-api.md` 步骤 11-12 | 分类推送（锚点匹配/死接口清理/import）、回读校验、报告 |
 
 ---
 
@@ -88,5 +90,5 @@ pull 参数解析（**步骤 2.5 由 `detect_mode.py` 脚本自动完成**）：
 4. **不可解析类型**：降级为 `{type: object}`，不中断流程
 5. **敏感信息**：Token 存于 `.claude/apifox.json`，建议加 `.gitignore`；也可用 `APIFOX_API_TOKEN` 环境变量。**禁止明文输出 Token**
 6. **PROJECT_ROOT 定位**：统一使用 `PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")`
-7. **幂等性**：同文件夹重复推送同一 Controller 使用 `AUTO_MERGE`；推到不同文件夹则 `CREATE_NEW`。**已知限制**：同 path+method 跨文件夹已存在时后续更新可能不准确
-# test
+7. **SKILL_DIR 定位**：脚本不在用户项目内，须经三级降级解析：`$CLAUDE_PLUGIN_ROOT` → `~/.claude/plugins/installed_plugins.json` 的 `installPath` → `$PROJECT_ROOT/skills/apifox-sync`。由 push 步骤 2 / pull 步骤 1 / init 步骤 1 的 bootstrap 一次性写入 `${TMPPREFIX}env.sh`，后续 Bash 调用只需 `source`。三处 bootstrap（`push-parse.md` / `pull.md` / `init.md`）必须保持字节一致，改动需同步三份
+8. **幂等性**：同文件夹重复推送同一 Controller 使用 `AUTO_MERGE`；推到不同文件夹则 `CREATE_NEW`。**已知限制**：同 path+method 跨文件夹已存在时后续更新可能不准确
